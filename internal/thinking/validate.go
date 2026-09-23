@@ -53,6 +53,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		return &config, nil
 	}
 
+	// Effective explicit-disable capability. The registry flag stays the source of
+	// truth, except for models known to reject thinking.type="disabled": the catalog
+	// is refreshed from the remote models.json at runtime, and that catalog can still
+	// advertise zero_allowed for them.
+	zeroAllowed := support.ZeroAllowed && !modelCannotDisableThinking(model)
+
 	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
 	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
 	// model supports discrete levels. Same-family conversions require strict validation.
@@ -166,7 +172,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	if config.Mode == ModeNone && toFormat == "claude" && support.ZeroAllowed {
+	if config.Mode == ModeNone && toFormat == "claude" && zeroAllowed {
 		// Claude supports explicit disable via thinking.type="disabled" unless ZeroAllowed is false.
 		// Keep Budget=0 so applier can omit budget_tokens.
 		config.Budget = 0
@@ -181,7 +187,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		// supported level. Budget-capable models reach this path with Budget > 0;
 		// level-only models need the capability flags checked explicitly because
 		// their Min/Max range is zero.
-		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
+		cannotDisableLevelModel := !zeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
 		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = ThinkingLevel(support.Levels[0])
 		}
@@ -333,6 +339,26 @@ func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 		return max
 	}
 	return value
+}
+
+// modelsCannotDisableThinking lists model ID prefixes that keep thinking always
+// on and answer thinking.type="disabled" with a 400 invalid_request_error.
+var modelsCannotDisableThinking = []string{"claude-opus-5-5", "claude-fable-5-1"}
+
+// modelCannotDisableThinking reports whether the model rejects an explicit
+// thinking disable, so no-thinking requests must fall back to the lowest
+// adaptive effort instead.
+func modelCannotDisableThinking(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.LastIndex(model, "/"); idx >= 0 {
+		model = model[idx+1:]
+	}
+	for _, prefix := range modelsCannotDisableThinking {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isLevelSupported(level string, supported []string) bool {
