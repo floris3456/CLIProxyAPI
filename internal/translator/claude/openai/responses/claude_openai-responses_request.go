@@ -124,12 +124,18 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		out, _ = sjson.SetBytes(out, "speed", "fast")
 	}
 
-	// System-level inputs become canonical top-level Claude system blocks in
-	// source order: instructions first, then every input item whose role is
-	// system or developer. Each source block stays a separate Claude block and
-	// keeps operator authority; the Claude executor decides the final placement
-	// (mid-conversation role=system messages, or system reminders on legacy
-	// models), so this layer must not merge, trim or downgrade them to user text.
+	// Leading system-level inputs become canonical top-level Claude system blocks
+	// in source order: instructions first, then every system or developer input
+	// item before the first conversation item. Each source block stays a separate
+	// Claude block and keeps operator authority; the Claude executor decides the
+	// final placement (mid-conversation role=system messages, or system reminders
+	// on legacy models), so this layer must not merge, trim or downgrade them to
+	// user text.
+	//
+	// System or developer items that appear later in the conversation (clients
+	// append instruction updates there, for example a new date) keep their place
+	// as role=system messages. Hoisting them would rewrite the prompt in front of
+	// the whole history and invalidate its prompt cache on every such update.
 	messageCapacity := root.Get("input.#").Int()
 	if messageCapacity == 0 && root.Get("input").Type == gjson.String {
 		messageCapacity = 1
@@ -153,32 +159,10 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if input := root.Get("input"); input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if !isResponsesSystemLevelRole(item.Get("role").String()) {
-				return true
+				// The first conversation item ends the leading system prompt.
+				return false
 			}
-			startIdx := len(systemBlocks)
-			content := item.Get("content")
-			if content.Type == gjson.String {
-				appendSystemText(content.String(), gjson.Result{})
-			} else if content.IsArray() {
-				content.ForEach(func(_, part gjson.Result) bool {
-					switch part.Get("type").String() {
-					case "input_text", "output_text", "text":
-						appendSystemText(part.Get("text").String(), part)
-					default:
-						if block := responsesSystemUnsupportedBlock(part); len(block) > 0 {
-							systemBlocks = append(systemBlocks, block)
-						}
-					}
-					return true
-				})
-			}
-			// Item-level cache_control applies to the last block this item produced.
-			if item.Get("cache_control").Exists() && len(systemBlocks) > startIdx {
-				lastIdx := len(systemBlocks) - 1
-				if !gjson.GetBytes(systemBlocks[lastIdx], "cache_control").Exists() {
-					systemBlocks[lastIdx] = common.AttachCacheControl(systemBlocks[lastIdx], item)
-				}
-			}
+			systemBlocks = append(systemBlocks, responsesSystemItemBlocks(item)...)
 			return true
 		})
 	}
@@ -197,13 +181,33 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	var pendingRole string
 	var pendingParts [][]byte
 	var pendingToolUseParts [][]byte
+	// Later system-level blocks wait for the end of the user turn they follow.
+	// A role=system message then sits between that user turn and the next
+	// assistant turn, exactly where the Claude executor places its own system
+	// messages, and never between a tool_use and its tool_result. The position
+	// depends only on earlier items, so it stays the same as the history grows.
+	var pendingSystemParts [][]byte
 	appendMessage := func(msg []byte) {
 		messageBlocks = append(messageBlocks, msg)
+	}
+	emitPendingSystem := func() {
+		if len(pendingSystemParts) == 0 {
+			return
+		}
+		msg := []byte(`{"role":"system","content":[]}`)
+		msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(pendingSystemParts))
+		appendMessage(msg)
+		pendingSystemParts = nil
 	}
 	flushPendingMessage := func() {
 		if pendingRole == "" {
 			return
 		}
+		defer func(role string) {
+			if role == "user" {
+				emitPendingSystem()
+			}
+		}(pendingRole)
 
 		parts := pendingParts
 		if pendingRole == "assistant" && len(pendingToolUseParts) > 0 {
@@ -307,11 +311,16 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	emittedRawToolUses := map[string]struct{}{}
 	unmappedItemTypes := map[string]int{}
 
+	leadingSystem := true
 	for _, item := range inputItems {
-		// System-level items already became top-level system blocks.
 		if isResponsesSystemLevelRole(item.Get("role").String()) {
+			// Leading system-level items already became top-level system blocks.
+			if !leadingSystem {
+				pendingSystemParts = append(pendingSystemParts, responsesSystemItemBlocks(item)...)
+			}
 			continue
 		}
+		leadingSystem = false
 		typ := item.Get("type").String()
 		if typ == "" && item.Get("role").String() != "" {
 			typ = "message"
@@ -526,6 +535,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 	flushPendingMessage()
+	if len(pendingSystemParts) > 0 {
+		// No user turn follows the last assistant turn, so there is no position a
+		// role=system message can take; keep the previous top-level placement.
+		systemBlocks = append(systemBlocks, pendingSystemParts...)
+		pendingSystemParts = nil
+	}
 	if len(unmappedItemTypes) > 0 {
 		log.Warnf("responses->claude: dropped input items of unmapped types %v (model=%s)", unmappedItemTypes, modelName)
 	}
@@ -643,6 +658,47 @@ func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
 		return info.MaxCompletionTokens
 	}
 	return maxTokens
+}
+
+// responsesSystemItemBlocks converts one system or developer input item into
+// Claude text blocks, keeping part- and item-level cache_control.
+func responsesSystemItemBlocks(item gjson.Result) [][]byte {
+	var blocks [][]byte
+	appendText := func(text string, cacheSource gjson.Result) {
+		if text == "" {
+			return
+		}
+		block := []byte(`{"type":"text","text":""}`)
+		block, _ = sjson.SetBytes(block, "text", text)
+		if cacheSource.Exists() {
+			block = common.AttachCacheControl(block, cacheSource)
+		}
+		blocks = append(blocks, block)
+	}
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		appendText(content.String(), gjson.Result{})
+	} else if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "input_text", "output_text", "text":
+				appendText(part.Get("text").String(), part)
+			default:
+				if block := responsesSystemUnsupportedBlock(part); len(block) > 0 {
+					blocks = append(blocks, block)
+				}
+			}
+			return true
+		})
+	}
+	// Item-level cache_control applies to the last block this item produced.
+	if item.Get("cache_control").Exists() && len(blocks) > 0 {
+		lastIdx := len(blocks) - 1
+		if !gjson.GetBytes(blocks[lastIdx], "cache_control").Exists() {
+			blocks[lastIdx] = common.AttachCacheControl(blocks[lastIdx], item)
+		}
+	}
+	return blocks
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level

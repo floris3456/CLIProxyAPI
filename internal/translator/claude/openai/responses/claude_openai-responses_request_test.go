@@ -1558,11 +1558,13 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemLevelInputsBecomeSeparateSy
 	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
 	root := gjson.ParseBytes(result)
 
+	// Leading items stay top-level. S2 follows the last assistant turn, so no
+	// user turn can carry it and it keeps the previous top-level placement.
 	system := root.Get("system").Array()
-	if len(system) != 4 {
-		t.Fatalf("system blocks = %d, want 4. system: %s", len(system), root.Get("system").Raw)
+	if len(system) != 3 {
+		t.Fatalf("system blocks = %d, want 3. system: %s", len(system), root.Get("system").Raw)
 	}
-	for idx, want := range []string{"I1", "S1", "D1", "S2"} {
+	for idx, want := range []string{"I1", "S1", "S2"} {
 		if got := system[idx].Get("type").String(); got != "text" {
 			t.Fatalf("system[%d].type = %q, want text", idx, got)
 		}
@@ -1571,23 +1573,113 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemLevelInputsBecomeSeparateSy
 		}
 	}
 
+	// D1 keeps its place as an authoritative role=system message.
 	messages := root.Get("messages").Array()
-	if len(messages) != 2 {
-		t.Fatalf("messages = %d, want 2. messages: %s", len(messages), root.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %d, want 3. messages: %s", len(messages), root.Get("messages").Raw)
 	}
-	if got := messages[0].Get("role").String(); got != "user" {
-		t.Fatalf("messages[0].role = %q, want user", got)
+	for idx, want := range []string{"user", "system", "assistant"} {
+		if got := messages[idx].Get("role").String(); got != want {
+			t.Fatalf("messages[%d].role = %q, want %q. messages: %s", idx, got, want, root.Get("messages").Raw)
+		}
 	}
-	if got := messages[1].Get("role").String(); got != "assistant" {
-		t.Fatalf("messages[1].role = %q, want assistant", got)
+	if got := messages[1].Get("content.0.text").String(); got != "D1" {
+		t.Fatalf("messages[1] text = %q, want D1", got)
 	}
-	if strings.Contains(root.Get("messages").Raw, "I1") ||
-		strings.Contains(root.Get("messages").Raw, "S1") ||
-		strings.Contains(root.Get("messages").Raw, "D1") {
-		t.Fatalf("system-level text must not be downgraded into messages: %s", root.Get("messages").Raw)
+	for _, msg := range []gjson.Result{messages[0], messages[2]} {
+		if raw := msg.Raw; strings.Contains(raw, "I1") || strings.Contains(raw, "S1") || strings.Contains(raw, "D1") || strings.Contains(raw, "S2") {
+			t.Fatalf("system-level text must not be downgraded into user or assistant content: %s", raw)
+		}
 	}
-	if strings.Contains(root.Get("messages").Raw, `"role":"system"`) {
-		t.Fatalf("translator must not emit role=system messages: %s", root.Get("messages").Raw)
+}
+
+// A client appends an instruction update (for example the new date at midnight)
+// as a developer item late in a long conversation. Every request before it must
+// remain a byte-identical prefix of the request after it, so the provider's
+// prompt cache for the whole history survives the update.
+func TestConvertOpenAIResponsesRequestToClaude_LateDeveloperItemKeepsCachePrefix(t *testing.T) {
+	history := `
+		{"type": "message", "role": "developer", "content": "You are a coding agent. Today's date: Fri Oct 02 2026"},
+		{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix the bug"}]},
+		{"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{\"cmd\":\"ls\"}"},
+		{"type": "function_call_output", "call_id": "call_1", "output": "main.go"},
+		{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Reading main.go"}]},
+		{"type": "function_call", "call_id": "call_2", "name": "shell", "arguments": "{\"cmd\":\"cat main.go\"}"},
+		{"type": "function_call_output", "call_id": "call_2", "output": "package main"}`
+	before := `{"model": "gpt-4.1", "input": [` + history + `]}`
+	after := `{"model": "gpt-4.1", "input": [` + history + `,
+		{"type": "message", "role": "developer", "content": "Today's date is now: Sat Oct 03 2026"}]}`
+	next := `{"model": "gpt-4.1", "input": [` + history + `,
+		{"type": "message", "role": "developer", "content": "Today's date is now: Sat Oct 03 2026"},
+		{"type": "function_call", "call_id": "call_3", "name": "shell", "arguments": "{\"cmd\":\"go test\"}"},
+		{"type": "function_call_output", "call_id": "call_3", "output": "ok"}]}`
+
+	convert := func(body string) gjson.Result {
+		return gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", []byte(body), false))
+	}
+	b, a, n := convert(before), convert(after), convert(next)
+
+	if b.Get("system").Raw != a.Get("system").Raw || a.Get("system").Raw != n.Get("system").Raw {
+		t.Fatalf("top-level system changed:\nbefore: %s\nafter: %s\nnext: %s", b.Get("system").Raw, a.Get("system").Raw, n.Get("system").Raw)
+	}
+	assertMessagePrefix(t, b.Get("messages").Array(), a.Get("messages").Array())
+	assertMessagePrefix(t, a.Get("messages").Array(), n.Get("messages").Array())
+
+	aMessages := a.Get("messages").Array()
+	last := aMessages[len(aMessages)-1]
+	if last.Get("role").String() != "system" || last.Get("content.0.text").String() != "Today's date is now: Sat Oct 03 2026" {
+		t.Fatalf("update must follow the tool_result turn as role=system: %s", a.Get("messages").Raw)
+	}
+	if problems := claudeMessageInvariantProblems(nMessages(n)); len(problems) > 0 {
+		t.Fatalf("message invariants: %v", problems)
+	}
+}
+
+// A system update that arrives between a tool_use and its tool_result waits for
+// the tool_result turn, because Claude requires the result immediately after.
+func TestConvertOpenAIResponsesRequestToClaude_LateSystemItemNeverSplitsToolPair(t *testing.T) {
+	inputJSON := `{"model": "gpt-4.1", "input": [
+		{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run it"}]},
+		{"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+		{"type": "message", "role": "developer", "content": "D1"},
+		{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]}
+	]}`
+	// A model that accepts an assistant prefill keeps the trailing turn visible.
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false))
+	messages := root.Get("messages").Array()
+	roles := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		roles = append(roles, msg.Get("role").String())
+	}
+	if got := strings.Join(roles, ","); got != "user,assistant,user,system,assistant" {
+		t.Fatalf("roles = %s, want user,assistant,user,system,assistant. messages: %s", got, root.Get("messages").Raw)
+	}
+	if got := messages[2].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("tool_result must directly follow tool_use: %s", root.Get("messages").Raw)
+	}
+	if root.Get("system").Exists() {
+		t.Fatalf("no leading system item, so no top-level system: %s", root.Get("system").Raw)
+	}
+}
+
+func nMessages(root gjson.Result) [][]byte {
+	var out [][]byte
+	for _, msg := range root.Get("messages").Array() {
+		out = append(out, []byte(msg.Raw))
+	}
+	return out
+}
+
+func assertMessagePrefix(t *testing.T, shorter, longer []gjson.Result) {
+	t.Helper()
+	if len(longer) < len(shorter) {
+		t.Fatalf("later request has fewer messages: %d < %d", len(longer), len(shorter))
+	}
+	for idx := range shorter {
+		if shorter[idx].Raw != longer[idx].Raw {
+			t.Fatalf("messages[%d] changed:\nbefore: %s\nafter:  %s", idx, shorter[idx].Raw, longer[idx].Raw)
+		}
 	}
 }
 

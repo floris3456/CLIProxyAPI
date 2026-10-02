@@ -87,7 +87,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 

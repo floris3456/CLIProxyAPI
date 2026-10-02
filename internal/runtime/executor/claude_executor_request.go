@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1585,6 +1586,16 @@ func claudePayloadHasMidSystemMessage(payload []byte) bool {
 		return true
 	})
 	return found
+}
+
+// translatedMidSystemNeedsTopLevel reports whether a translated request carries
+// positional role=system messages that its model cannot accept. Translators keep
+// later system and developer items in place so appending one does not rewrite
+// the cached prompt prefix; legacy models have no mid-conversation system slot,
+// so those requests keep the previous top-level placement. Native Claude
+// callers own their wire and are validated separately.
+func translatedMidSystemNeedsTopLevel(from sdktranslator.Format, payload []byte) bool {
+	return from != sdktranslator.FormatClaude && claudeUsesLegacySystemReminder(payload) && claudePayloadHasMidSystemMessage(payload)
 }
 
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {

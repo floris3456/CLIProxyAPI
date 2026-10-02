@@ -44,7 +44,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
@@ -150,7 +150,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
