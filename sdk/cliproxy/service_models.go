@@ -64,6 +64,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			excluded = strings.Split(val, ",")
 		}
 	}
+	excluded = withMetadataExcludedModels(a, excluded)
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
 		return
 	}
@@ -1175,6 +1176,67 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 		} else {
 			out = append(out, model)
 		}
+	}
+	return out
+}
+
+// withMetadataExcludedModels adds the credential file's own "excluded_models" when
+// the auth carries no pre-merged "excluded_models" attribute. The file watcher's
+// synthesizer sets that attribute, but auths loaded directly from the token store
+// (notably plugin-parsed credentials at startup) do not, so a registration racing
+// the watcher used to expose every model the account had excluded.
+func withMetadataExcludedModels(a *coreauth.Auth, excluded []string) []string {
+	if a == nil {
+		return excluded
+	}
+	if a.Attributes != nil && strings.TrimSpace(a.Attributes["excluded_models"]) != "" {
+		return excluded
+	}
+	perAccount := metadataExcludedModels(a.Metadata)
+	if len(perAccount) == 0 {
+		return excluded
+	}
+	seen := make(map[string]struct{}, len(excluded)+len(perAccount))
+	out := make([]string, 0, len(excluded)+len(perAccount))
+	for _, item := range append(append([]string{}, excluded...), perAccount...) {
+		key := strings.ToLower(strings.TrimSpace(item))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, strings.TrimSpace(item))
+	}
+	return out
+}
+
+// metadataExcludedModels reads per-account exclusions from credential metadata
+// ("excluded_models", legacy "excluded-models"), as the watcher synthesizer does.
+func metadataExcludedModels(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata["excluded_models"]
+	if !ok {
+		raw, ok = metadata["excluded-models"]
+	}
+	if !ok || raw == nil {
+		return nil
+	}
+	var out []string
+	switch v := raw.(type) {
+	case []string:
+		out = append(out, v...)
+	case []any:
+		for _, item := range v {
+			if s, okString := item.(string); okString {
+				out = append(out, s)
+			}
+		}
+	case string:
+		out = strings.Split(v, ",")
 	}
 	return out
 }

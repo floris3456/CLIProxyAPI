@@ -289,6 +289,16 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					}
 					auth.Metadata["disabled"] = true
 				}
+				// Keep the file's per-account model exclusions even when the plugin
+				// parser does not echo them; model registration reads them from metadata.
+				if excluded, ok := metadata["excluded_models"]; ok {
+					if auth.Metadata == nil {
+						auth.Metadata = make(map[string]any)
+					}
+					if _, present := auth.Metadata["excluded_models"]; !present {
+						auth.Metadata["excluded_models"] = excluded
+					}
+				}
 				if p, ok := metadata["proxy_url"].(string); ok && auth.ProxyURL == "" {
 					auth.ProxyURL = strings.TrimSpace(p)
 				}

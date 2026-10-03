@@ -449,3 +449,29 @@ func (f fileStoreMultiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthP
 func (f fileStoreMultiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
 	return f(ctx, req)
 }
+
+// A plugin parser that does not echo excluded_models must not drop the file's
+// per-account exclusions; model registration reads them from metadata.
+func TestFileTokenStoreListKeepsPluginAuthExcludedModels(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "plugin.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"plugin","excluded_models":["plugin/a","plugin/b"]}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+	RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{{ID: "plugin.json", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}}}, true, nil
+	}))
+	t.Cleanup(func() {
+		RegisterPluginAuthParser(nil)
+	})
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil || len(auths) != 1 {
+		t.Fatalf("List() = %#v, %v", auths, errList)
+	}
+	got, _ := auths[0].Metadata["excluded_models"].([]any)
+	if len(got) != 2 || got[0] != "plugin/a" || got[1] != "plugin/b" {
+		t.Fatalf("excluded_models lost: %#v", auths[0].Metadata)
+	}
+}

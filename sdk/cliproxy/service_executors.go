@@ -556,6 +556,10 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 			activeExcluded = strings.Split(val, ",")
 		}
 	}
+	if activeAuth != a {
+		activeExcluded = withMetadataExcludedModels(activeAuth, activeExcluded)
+		activeExcluded = withMetadataExcludedModels(a, activeExcluded)
+	}
 	if ctx != nil && ctx.Err() != nil {
 		return true
 	}

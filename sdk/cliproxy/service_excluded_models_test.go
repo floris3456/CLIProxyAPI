@@ -407,3 +407,38 @@ func TestRegisterModelsForAuth_DevinSWE16SlowIncluded(t *testing.T) {
 		t.Errorf("DisplayName = %q, want 'SWE-1.6 Slow'", foundSlow.DisplayName)
 	}
 }
+
+// An auth loaded straight from the token store has its per-account exclusions only
+// in metadata (no synthesizer attribute); registration must still honor them.
+func TestRegisterModelsForAuth_MetadataExcludedModelsWithoutAttribute(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:         "auth-gemini-metadata",
+		Provider:   "gemini",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"type": "gemini", "excluded_models": []any{"gemini-2.5-flash", "gemini-2.5-pro"}},
+	}
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { registry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := registry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected gemini models to be registered")
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if strings.EqualFold(id, "gemini-2.5-flash") || strings.EqualFold(id, "gemini-2.5-pro") {
+			t.Fatalf("model %q excluded in credential metadata was registered", id)
+		}
+	}
+	if got := withMetadataExcludedModels(&coreauth.Auth{Attributes: map[string]string{"excluded_models": "a"}, Metadata: map[string]any{"excluded_models": []any{"b"}}}, []string{"a"}); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("a pre-merged attribute must stay authoritative: %v", got)
+	}
+}
