@@ -60,7 +60,9 @@ var standardLevels = []string{"none", "auto", "minimal", "low", "medium", "high"
 
 func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
-	tiers := codexServiceTiers(h.codexClientModelsResponse(""))
+	codexCatalogue := h.codexClientModelsResponse("")
+	tiers := codexServiceTiers(codexCatalogue)
+	codexContext := codexContextWindows(codexCatalogue)
 	models := h.Models()
 	details := make([]ModelDetail, 0, len(models))
 	for _, model := range models {
@@ -75,6 +77,12 @@ func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 			return thinking.GetProviderApplier(provider) != nil
 		})
 		detail.ServiceTiers = append([]string{}, tiers[id]...)
+		// Codex applies the catalogue's context_window (272k for current GPT models);
+		// the generic registry can list a larger raw window (e.g. 921k for gpt-5.6)
+		// that Codex does not use by default.
+		if window := codexContext[id]; window > 0 && containsString(detail.Providers, "codex") {
+			detail.ContextLength = window
+		}
 		// Image models are served by /v1/images/generations, not chat.
 		if isSupportedImagesModel(id) {
 			markImageModel(&detail)
@@ -262,17 +270,7 @@ func intersectLevels(a, b []string) []string {
 
 func codexServiceTiers(response map[string]any) map[string][]string {
 	out := map[string][]string{}
-	models, _ := response["models"].([]map[string]any)
-	if models == nil {
-		if raw, ok := response["models"].([]any); ok {
-			for _, item := range raw {
-				if m, ok := item.(map[string]any); ok {
-					models = append(models, m)
-				}
-			}
-		}
-	}
-	for _, model := range models {
+	for _, model := range codexModels(response) {
 		slug := stringValue(model["slug"])
 		if slug == "" {
 			continue
@@ -299,6 +297,34 @@ func codexServiceTiers(response map[string]any) map[string][]string {
 		}
 	}
 	return out
+}
+
+// codexContextWindows maps Codex catalogue slugs to their default context_window
+// (not max_context_window, which is an opt-in extension).
+func codexContextWindows(response map[string]any) map[string]int {
+	out := map[string]int{}
+	for _, model := range codexModels(response) {
+		if slug := stringValue(model["slug"]); slug != "" {
+			if window := intValue(model["context_window"]); window > 0 {
+				out[slug] = window
+			}
+		}
+	}
+	return out
+}
+
+func codexModels(response map[string]any) []map[string]any {
+	models, _ := response["models"].([]map[string]any)
+	if models == nil {
+		if raw, ok := response["models"].([]any); ok {
+			for _, item := range raw {
+				if m, ok := item.(map[string]any); ok {
+					models = append(models, m)
+				}
+			}
+		}
+	}
+	return models
 }
 
 func normalizeModalities(values []string) []string {

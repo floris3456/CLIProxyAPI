@@ -147,3 +147,44 @@ func TestOpenAIModelsDetailsEndpoint(t *testing.T) {
 		t.Fatalf("plain list changed: %s", w.Body.String())
 	}
 }
+
+func TestCodexContextWindowsUsesDefaultWindow(t *testing.T) {
+	response := map[string]any{"models": []any{
+		map[string]any{"slug": "gpt-5.6-sol", "context_window": float64(272000), "max_context_window": float64(872000)},
+		map[string]any{"slug": "no-window"},
+	}}
+	got := codexContextWindows(response)
+	if !reflect.DeepEqual(got, map[string]int{"gpt-5.6-sol": 272000}) {
+		t.Fatalf("%v", got)
+	}
+}
+
+// The registry lists 921k for gpt-5.6 models; Codex applies 272k. The details
+// catalogue must report what Codex uses.
+func TestOpenAIModelsDetailsUsesCodexContextWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("details-codex-ctx", "codex", []*registry.ModelInfo{{ID: "gpt-5.6-sol", OwnedBy: "openai", ContextLength: 921000, MaxCompletionTokens: 128000,
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}}})
+	t.Cleanup(func() { reg.UnregisterClient("details-codex-ctx") })
+	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/v1/models?details=true", nil)
+	h.OpenAIModels(c)
+	var body struct {
+		Data []ModelDetail `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range body.Data {
+		if d.ID == "gpt-5.6-sol" {
+			if d.ContextLength != 272000 {
+				t.Fatalf("gpt-5.6-sol context = %d, want Codex's 272000", d.ContextLength)
+			}
+			return
+		}
+	}
+	t.Fatal("gpt-5.6-sol missing")
+}
