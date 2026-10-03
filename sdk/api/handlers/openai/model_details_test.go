@@ -180,8 +180,9 @@ func TestOpenAIModelsDetailsUsesCodexContextWindow(t *testing.T) {
 	}
 	for _, d := range body.Data {
 		if d.ID == "gpt-5.6-sol" {
-			if d.ContextLength != 272000 {
-				t.Fatalf("gpt-5.6-sol context = %d, want Codex's 272000", d.ContextLength)
+			// Codex's 272k is the prompt budget; the 128k reply comes on top.
+			if d.InputLength != 272000 || d.ContextLength != 400000 {
+				t.Fatalf("gpt-5.6-sol input = %d context = %d, want Codex's 272000 input and 272000+128000 total", d.InputLength, d.ContextLength)
 			}
 			return
 		}
@@ -211,8 +212,8 @@ func TestOpenAIModelsDetailsHonoursConfiguredContextLength(t *testing.T) {
 	}
 	for _, d := range body.Data {
 		if d.ID == "gpt-5.6-sol" {
-			if d.ContextLength != 400000 {
-				t.Fatalf("gpt-5.6-sol context = %d, want the configured 400000", d.ContextLength)
+			if d.InputLength != 400000 || d.ContextLength != 528000 {
+				t.Fatalf("gpt-5.6-sol input = %d context = %d, want the configured 400000 input (+128000 output)", d.InputLength, d.ContextLength)
 			}
 			return
 		}
@@ -249,4 +250,24 @@ func TestOpenAIModelsDetailsReportsConfiguredOverrides(t *testing.T) {
 		}
 	}
 	t.Fatal("claude-opus-5-5 missing")
+}
+
+func TestApplyInputWindow(t *testing.T) {
+	cases := []struct {
+		name                   string
+		detail                 ModelDetail
+		window                 int
+		wantInput, wantContext int
+	}{
+		{"window plus output", ModelDetail{ContextLength: 921000, MaxCompletionTokens: 128000}, 272000, 272000, 400000},
+		{"unknown output: the window is the whole context", ModelDetail{ContextLength: 1048576}, 1048576, 0, 1048576},
+		{"no window leaves the registry value", ModelDetail{ContextLength: 200000, MaxCompletionTokens: 64000}, 0, 0, 200000},
+	}
+	for _, tc := range cases {
+		d := tc.detail
+		applyInputWindow(&d, tc.window)
+		if d.InputLength != tc.wantInput || d.ContextLength != tc.wantContext {
+			t.Errorf("%s: input=%d context=%d, want %d/%d", tc.name, d.InputLength, d.ContextLength, tc.wantInput, tc.wantContext)
+		}
+	}
 }

@@ -43,9 +43,14 @@ type ModelDetail struct {
 	OwnedBy     string `json:"owned_by,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 	// Kind is "chat" (Responses/Chat Completions) or "image" (/v1/images/generations).
-	Kind                string         `json:"kind"`
-	Providers           []string       `json:"providers"`
-	ContextLength       int            `json:"context_length,omitempty"`
+	Kind      string   `json:"kind"`
+	Providers []string `json:"providers"`
+	// ContextLength is the total window (prompt + reply).
+	ContextLength int `json:"context_length,omitempty"`
+	// InputLength is the largest prompt the model takes, reported when it is smaller
+	// than ContextLength. Codex's context_window is such an input budget: GPT models
+	// take 272k of prompt plus 128k of reply, a 400k total.
+	InputLength         int            `json:"input_length,omitempty"`
 	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
 	InputModalities     []string       `json:"input_modalities,omitempty"`
 	OutputModalities    []string       `json:"output_modalities"`
@@ -77,18 +82,21 @@ func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 			return thinking.GetProviderApplier(provider) != nil
 		})
 		detail.ServiceTiers = append([]string{}, tiers[id]...)
-		// Codex applies the catalogue's context_window (272k for current GPT models);
-		// the generic registry can list a larger raw window (e.g. 921k for gpt-5.6)
-		// that Codex does not use by default.
 		// Image models are served by /v1/images/generations, not chat.
 		if isSupportedImagesModel(id) {
 			markImageModel(&detail)
 		}
-		// Image models have no chat context; the Codex template's window does not apply.
-		// An explicit max-context-length from CPA's config always wins.
-		if window := codexContext[id]; window > 0 && detail.Kind == "chat" && containsString(detail.Providers, "codex") &&
-			!hasConfiguredContextLength(detail.Providers, id) {
-			detail.ContextLength = window
+		// Image models have no chat context; the Codex window does not apply to them.
+		if detail.Kind == "chat" && containsString(detail.Providers, "codex") {
+			// Codex sends prompts up to the catalogue's context_window (272k for current
+			// GPT models); the generic registry can list a larger raw window (e.g. 921k
+			// for gpt-5.6) that Codex does not use. An explicit max-context-length from
+			// CPA's config always wins (it also sets the Codex context_window).
+			window := codexContext[id]
+			if hasConfiguredContextLength(detail.Providers, id) {
+				window = detail.ContextLength
+			}
+			applyInputWindow(&detail, window)
 		}
 		details = append(details, detail)
 	}
@@ -300,6 +308,20 @@ func codexServiceTiers(response map[string]any) map[string][]string {
 		}
 	}
 	return out
+}
+
+// applyInputWindow records a Codex input budget: the prompt may fill the window
+// and the reply comes on top, so the total context is window + max output.
+func applyInputWindow(detail *ModelDetail, window int) {
+	if window <= 0 {
+		return
+	}
+	detail.ContextLength = window
+	detail.InputLength = 0
+	if detail.MaxCompletionTokens > 0 {
+		detail.InputLength = window
+		detail.ContextLength = window + detail.MaxCompletionTokens
+	}
 }
 
 // hasConfiguredContextLength reports whether any route carries an explicit
