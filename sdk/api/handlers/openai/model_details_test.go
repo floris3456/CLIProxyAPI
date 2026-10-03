@@ -105,9 +105,11 @@ func TestOpenAIModelsDetailsEndpoint(t *testing.T) {
 	reg.RegisterClient("details-claude", "claude", []*registry.ModelInfo{{ID: "details-opus", OwnedBy: "anthropic", ContextLength: 1000000, MaxCompletionTokens: 128000,
 		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}}})
 	reg.RegisterClient("details-zen", "zen", []*registry.ModelInfo{{ID: "details-free", UserDefined: true}})
+	reg.RegisterClient("details-codex-image", "codex", []*registry.ModelInfo{{ID: "gpt-image-2"}})
 	t.Cleanup(func() {
 		reg.UnregisterClient("details-claude")
 		reg.UnregisterClient("details-zen")
+		reg.UnregisterClient("details-codex-image")
 	})
 	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 	w := httptest.NewRecorder()
@@ -129,6 +131,9 @@ func TestOpenAIModelsDetailsEndpoint(t *testing.T) {
 	opus, free := got["details-opus"], got["details-free"]
 	if opus.Reasoning.Mode != ReasoningLevels || !reflect.DeepEqual(opus.Reasoning.Levels, []string{"low", "medium", "high", "xhigh", "max"}) || opus.ContextLength != 1000000 || opus.MaxCompletionTokens != 128000 {
 		t.Fatalf("opus: %+v", opus)
+	}
+	if image := got["gpt-image-2"]; image.Kind != "image" || image.Reasoning.Mode != ReasoningNone || !reflect.DeepEqual(image.OutputModalities, []string{"image"}) {
+		t.Fatalf("codex image tool model: %+v", image)
 	}
 	if free.Reasoning.Mode != ReasoningPassthrough {
 		t.Fatalf("user-defined: %+v", free)

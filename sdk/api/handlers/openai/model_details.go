@@ -38,10 +38,11 @@ type ModelReasoning struct {
 
 // ModelDetail is one entry of the details catalogue.
 type ModelDetail struct {
-	ID                  string         `json:"id"`
-	Object              string         `json:"object"`
-	OwnedBy             string         `json:"owned_by,omitempty"`
-	DisplayName         string         `json:"display_name,omitempty"`
+	ID          string `json:"id"`
+	Object      string `json:"object"`
+	OwnedBy     string `json:"owned_by,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	// Kind is "chat" (Responses/Chat Completions) or "image" (/v1/images/generations).
 	Kind                string         `json:"kind"`
 	Providers           []string       `json:"providers"`
 	ContextLength       int            `json:"context_length,omitempty"`
@@ -74,6 +75,10 @@ func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 			return thinking.GetProviderApplier(provider) != nil
 		})
 		detail.ServiceTiers = append([]string{}, tiers[id]...)
+		// Image models are served by /v1/images/generations, not chat.
+		if isSupportedImagesModel(id) {
+			markImageModel(&detail)
+		}
 		details = append(details, detail)
 	}
 	sort.Slice(details, func(i, j int) bool { return details[i].ID < details[j].ID })
@@ -131,8 +136,7 @@ func buildModelDetail(id string, model map[string]any, providers []string, looku
 			detail.MaxCompletionTokens = info.MaxCompletionTokens
 		}
 		if info.Type == registry.OpenAIImageModelType {
-			detail.Kind = "image"
-			detail.OutputModalities = []string{"image"}
+			markImageModel(&detail)
 		}
 		if len(detail.InputModalities) == 0 && len(info.SupportedInputModalities) > 0 {
 			detail.InputModalities = normalizeModalities(info.SupportedInputModalities)
@@ -146,7 +150,11 @@ func buildModelDetail(id string, model map[string]any, providers []string, looku
 	if len(detail.InputModalities) == 0 {
 		detail.InputModalities = []string{"text"}
 	}
-	detail.Reasoning = resolveReasoning(detail.Providers, lookup, hasApplier)
+	if detail.Kind == "image" {
+		detail.Reasoning = ModelReasoning{Mode: ReasoningNone}
+	} else {
+		detail.Reasoning = resolveReasoning(detail.Providers, lookup, hasApplier)
+	}
 	return detail
 }
 
@@ -234,6 +242,12 @@ func thinkingLevels(support *registry.ThinkingSupport) []string {
 		}
 	}
 	return out
+}
+
+func markImageModel(detail *ModelDetail) {
+	detail.Kind = "image"
+	detail.OutputModalities = []string{"image"}
+	detail.Reasoning = ModelReasoning{Mode: ReasoningNone}
 }
 
 func intersectLevels(a, b []string) []string {
