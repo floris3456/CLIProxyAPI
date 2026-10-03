@@ -85,7 +85,9 @@ func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 			markImageModel(&detail)
 		}
 		// Image models have no chat context; the Codex template's window does not apply.
-		if window := codexContext[id]; window > 0 && detail.Kind == "chat" && containsString(detail.Providers, "codex") {
+		// An explicit max-context-length from CPA's config always wins.
+		if window := codexContext[id]; window > 0 && detail.Kind == "chat" && containsString(detail.Providers, "codex") &&
+			!hasConfiguredContextLength(detail.Providers, id) {
 			detail.ContextLength = window
 		}
 		details = append(details, detail)
@@ -298,6 +300,17 @@ func codexServiceTiers(response map[string]any) map[string][]string {
 		}
 	}
 	return out
+}
+
+// hasConfiguredContextLength reports whether any route carries an explicit
+// max-context-length from CPA's configuration (oauth settings or configured models).
+func hasConfiguredContextLength(providers []string, id string) bool {
+	for _, provider := range providers {
+		if info := registry.LookupModelInfo(id, provider); info != nil && info.MaxContextLength > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // codexContextWindows maps Codex catalogue slugs to their default context_window

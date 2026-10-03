@@ -188,3 +188,65 @@ func TestOpenAIModelsDetailsUsesCodexContextWindow(t *testing.T) {
 	}
 	t.Fatal("gpt-5.6-sol missing")
 }
+
+// An explicit oauth-settings max-context-length is registered as MaxContextLength
+// (and ContextLength); it must win over the Codex catalogue's default window.
+func TestOpenAIModelsDetailsHonoursConfiguredContextLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("details-codex-ctx-cfg", "codex", []*registry.ModelInfo{{ID: "gpt-5.6-sol", OwnedBy: "openai",
+		ContextLength: 400000, MaxContextLength: 400000, MaxCompletionTokens: 128000,
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}}})
+	t.Cleanup(func() { reg.UnregisterClient("details-codex-ctx-cfg") })
+	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/v1/models?details=true", nil)
+	h.OpenAIModels(c)
+	var body struct {
+		Data []ModelDetail `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range body.Data {
+		if d.ID == "gpt-5.6-sol" {
+			if d.ContextLength != 400000 {
+				t.Fatalf("gpt-5.6-sol context = %d, want the configured 400000", d.ContextLength)
+			}
+			return
+		}
+	}
+	t.Fatal("gpt-5.6-sol missing")
+}
+
+// Overrides registered from oauth-settings (display name, output, levels) reach the details catalogue.
+func TestOpenAIModelsDetailsReportsConfiguredOverrides(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("details-oauth-overrides", "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5", Object: "model", OwnedBy: "anthropic", Type: "claude",
+		DisplayName: "Opus (CPA)", ContextLength: 1000000, MaxCompletionTokens: 64000, ExplicitThinking: true,
+		Thinking: &registry.ThinkingSupport{DynamicAllowed: true, Levels: []string{"low", "medium", "high"}}}})
+	t.Cleanup(func() { reg.UnregisterClient("details-oauth-overrides") })
+	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/v1/models?details=true", nil)
+	h.OpenAIModels(c)
+	var body struct {
+		Data []ModelDetail `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range body.Data {
+		if d.ID == "claude-opus-5-5" {
+			if d.DisplayName != "Opus (CPA)" || d.MaxCompletionTokens != 64000 || d.ContextLength != 1000000 ||
+				d.Reasoning.Mode != ReasoningLevels || !reflect.DeepEqual(d.Reasoning.Levels, []string{"low", "medium", "high"}) {
+				t.Fatalf("claude-opus-5-5 = %+v", d)
+			}
+			return
+		}
+	}
+	t.Fatal("claude-opus-5-5 missing")
+}
