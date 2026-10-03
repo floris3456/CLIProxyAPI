@@ -80,12 +80,13 @@ func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 		// Codex applies the catalogue's context_window (272k for current GPT models);
 		// the generic registry can list a larger raw window (e.g. 921k for gpt-5.6)
 		// that Codex does not use by default.
-		if window := codexContext[id]; window > 0 && containsString(detail.Providers, "codex") {
-			detail.ContextLength = window
-		}
 		// Image models are served by /v1/images/generations, not chat.
 		if isSupportedImagesModel(id) {
 			markImageModel(&detail)
+		}
+		// Image models have no chat context; the Codex template's window does not apply.
+		if window := codexContext[id]; window > 0 && detail.Kind == "chat" && containsString(detail.Providers, "codex") {
+			detail.ContextLength = window
 		}
 		details = append(details, detail)
 	}

@@ -132,7 +132,7 @@ func TestOpenAIModelsDetailsEndpoint(t *testing.T) {
 	if opus.Reasoning.Mode != ReasoningLevels || !reflect.DeepEqual(opus.Reasoning.Levels, []string{"low", "medium", "high", "xhigh", "max"}) || opus.ContextLength != 1000000 || opus.MaxCompletionTokens != 128000 {
 		t.Fatalf("opus: %+v", opus)
 	}
-	if image := got["gpt-image-2"]; image.Kind != "image" || image.Reasoning.Mode != ReasoningNone || !reflect.DeepEqual(image.OutputModalities, []string{"image"}) {
+	if image := got["gpt-image-2"]; image.ContextLength != 0 || image.Kind != "image" || image.Reasoning.Mode != ReasoningNone || !reflect.DeepEqual(image.OutputModalities, []string{"image"}) {
 		t.Fatalf("codex image tool model: %+v", image)
 	}
 	if free.Reasoning.Mode != ReasoningPassthrough {
