@@ -1168,14 +1168,35 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 			continue
 		}
 		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name)
-		if setting != nil && setting.MaxContextLength > 0 {
-			clone := *model
+		if setting == nil || !setting.HasOverrides() {
+			out = append(out, model)
+			continue
+		}
+		clone := *model
+		if setting.MaxContextLength > 0 {
 			clone.ContextLength = setting.MaxContextLength
 			clone.MaxContextLength = setting.MaxContextLength
-			out = append(out, &clone)
-		} else {
-			out = append(out, model)
 		}
+		if setting.MaxOutputTokens > 0 {
+			clone.MaxCompletionTokens = setting.MaxOutputTokens
+			if clone.OutputTokenLimit > 0 {
+				clone.OutputTokenLimit = setting.MaxOutputTokens
+			}
+		}
+		if name := strings.TrimSpace(setting.DisplayName); name != "" {
+			clone.DisplayName = name
+		}
+		if len(setting.ThinkingLevels) > 0 {
+			// Never mutate the shared definition: copy the thinking support before replacing levels.
+			thinkingSupport := registry.ThinkingSupport{}
+			if model.Thinking != nil {
+				thinkingSupport = *model.Thinking
+			}
+			thinkingSupport.Levels = append([]string(nil), setting.ThinkingLevels...)
+			clone.Thinking = &thinkingSupport
+			clone.ExplicitThinking = true
+		}
+		out = append(out, &clone)
 	}
 	return out
 }

@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
 
@@ -129,10 +131,21 @@ func (cfg *Config) SanitizeOAuthSettings() {
 				continue
 			}
 			seen[key] = struct{}{}
+			levels, unknown := NormalizeOAuthSettingThinkingLevels(entry.ThinkingLevels)
+			if len(unknown) > 0 {
+				log.Warnf("oauth-settings[%s] %s: ignoring unknown thinking levels %v (known: %v)", channel, name, unknown, OAuthSettingThinkingLevels)
+			}
+			maxOutput := entry.MaxOutputTokens
+			if maxOutput < 0 {
+				maxOutput = 0
+			}
 			reversed = append(reversed, OAuthModelSetting{
 				Name:             name,
 				Alias:            alias,
 				MaxContextLength: entry.MaxContextLength,
+				MaxOutputTokens:  maxOutput,
+				DisplayName:      strings.TrimSpace(entry.DisplayName),
+				ThinkingLevels:   levels,
 			})
 		}
 		if len(reversed) > 0 {

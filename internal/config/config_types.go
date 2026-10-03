@@ -393,12 +393,66 @@ type OAuthModelSetting struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 
-	// MaxContextLength overrides the context window advertised to Codex clients.
+	// MaxContextLength overrides the model's context window (model lists and Codex client metadata).
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
+	// MaxOutputTokens overrides the model's maximum completion tokens. Executors that cap or
+	// default max_tokens from the model definition use this value.
+	MaxOutputTokens int `yaml:"max-output-tokens,omitempty" json:"max-output-tokens,omitempty"`
+
+	// DisplayName overrides the human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
+	// ThinkingLevels replaces the reasoning effort levels CPA accepts and advertises for the
+	// model (none, auto, minimal, low, medium, high, xhigh, max). A request for a level outside
+	// the list is treated like any other unsupported level (Codex rejects it with the valid
+	// levels; Claude-format xhigh/max requests fall back to the nearest configured high level).
+	ThinkingLevels []string `yaml:"thinking-levels,omitempty" json:"thinking-levels,omitempty"`
 }
 
 // GetMaxContextLength returns the configured maximum context length override.
 func (s OAuthModelSetting) GetMaxContextLength() int { return s.MaxContextLength }
+
+// HasOverrides reports whether the setting changes any model field.
+func (s OAuthModelSetting) HasOverrides() bool {
+	return s.MaxContextLength > 0 || s.MaxOutputTokens > 0 || strings.TrimSpace(s.DisplayName) != "" || len(s.ThinkingLevels) > 0
+}
+
+// OAuthSettingThinkingLevels lists the effort names oauth settings may configure, in order.
+var OAuthSettingThinkingLevels = []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// NormalizeOAuthSettingThinkingLevels lower-cases, de-duplicates and orders configured levels,
+// returning the kept levels and any names CPA does not know (which are dropped).
+func NormalizeOAuthSettingThinkingLevels(levels []string) (kept []string, unknown []string) {
+	if len(levels) == 0 {
+		return nil, nil
+	}
+	want := make(map[string]bool, len(levels))
+	for _, level := range levels {
+		name := strings.ToLower(strings.TrimSpace(level))
+		if name == "" {
+			continue
+		}
+		known := false
+		for _, candidate := range OAuthSettingThinkingLevels {
+			if candidate == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			unknown = append(unknown, name)
+			continue
+		}
+		want[name] = true
+	}
+	for _, candidate := range OAuthSettingThinkingLevels {
+		if want[candidate] {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept, unknown
+}
 
 // ResolveOAuthModelSetting finds the best matching OAuthModelSetting for a given model.
 // An exact Alias match on the model ID takes precedence over a general Name match.

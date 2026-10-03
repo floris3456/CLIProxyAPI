@@ -904,14 +904,27 @@ oauth:
   #       alias: "sample-latest"
 
   # OAuth provider model settings (per channel)
-  # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
+  # Overrides model-level capabilities for OAuth credentials. They apply to /v1/models,
+  # /v1/models?details=true and the Codex client catalogue, and thinking-levels is also what
+  # CPA enforces on requests. Match by upstream name, or by name + alias for an aliased model.
   # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Optional per-entry fields:
+  #   max-context-length: 524288       # context window
+  #   max-output-tokens: 64000         # max completion tokens (executors that cap/default max_tokens use it)
+  #   display-name: "GPT-6 Sol"        # catalogue display name
+  #   thinking-levels: [low, medium, high] # replaces the accepted/advertised effort levels
+  #                                    # (none, auto, minimal, low, medium, high, xhigh, max; unknown names are ignored)
   # settings:
   #   codex:
   #     - name: "gpt-6-sol"
-  #       max-context-length: 524288 # overrides context window advertised to Codex clients
+  #       max-context-length: 524288
   #     - name: "gpt-6-astra"
   #       max-context-length: 1048576
+  #       thinking-levels: [low, medium, high, xhigh]
+  #   claude:
+  #     - name: "claude-opus-5-5"
+  #       max-output-tokens: 64000
+  #       display-name: "Opus 5.5"
 
   # OAuth provider excluded models
   # excluded-models:
