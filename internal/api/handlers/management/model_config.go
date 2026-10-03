@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -136,7 +139,7 @@ func buildModelCatalogue(cfg *config.Config, manager *coreauth.Manager, details 
 			cat.channelAuths[channel] = append(cat.channelAuths[channel], auth)
 			prefix := strings.Trim(strings.TrimSpace(auth.Prefix), "/")
 			global := cfg.OAuthExcludedModels[strings.ToLower(strings.TrimSpace(auth.Provider))]
-			perAccount := authExcludedModels(auth)
+			perAccount := credentialExcludedModels(auth, cfg.AuthDir)
 
 			candidates := registry.ClientCandidates(auth.ID)
 			if len(candidates) == 0 {
@@ -539,6 +542,7 @@ func (h *Handler) applyAccountModelConfigLocked(c *gin.Context, cat modelCatalog
 	type authEdit struct {
 		auth      *coreauth.Auth
 		remaining []string
+		path      string
 	}
 	var edits []authEdit
 	if enabled != nil {
@@ -567,7 +571,7 @@ func (h *Handler) applyAccountModelConfigLocked(c *gin.Context, cat modelCatalog
 		}
 		if *enabled {
 			for _, auth := range auths {
-				list := authExcludedModels(auth)
+				list := credentialExcludedModels(auth, h.cfg.AuthDir)
 				if matchingPattern(list, upstream) == "" {
 					continue
 				}
@@ -583,7 +587,15 @@ func (h *Handler) applyAccountModelConfigLocked(c *gin.Context, cat modelCatalog
 				if coreauth.IsPluginVirtualAuth(auth) {
 					return badModelConfig(http.StatusConflict, "the model is disabled in a plugin-managed credential")
 				}
-				edits = append(edits, authEdit{auth: auth, remaining: kept})
+				// Lists kept in memory are saved through the auth store; lists that only
+				// exist in the credential file (plugin-parsed credentials) are edited there.
+				path := ""
+				if !metadataHasExcluded(auth) {
+					if path = credentialFilePath(auth, h.cfg.AuthDir); path == "" {
+						return badModelConfig(http.StatusConflict, "the model is disabled in a credential that cannot be edited here")
+					}
+				}
+				edits = append(edits, authEdit{auth: auth, remaining: kept, path: path})
 			}
 		}
 	}
@@ -650,6 +662,14 @@ func (h *Handler) applyAccountModelConfigLocked(c *gin.Context, cat modelCatalog
 
 	for _, edit := range edits {
 		auth := edit.auth
+		if edit.path != "" {
+			// Plugin-parsed credential: the file is the source of truth; the file watcher
+			// re-registers the models after the write.
+			if err := writeCredentialExcludedModels(edit.path, edit.remaining); err != nil {
+				return badModelConfig(http.StatusInternalServerError, "failed to update credential file: "+err.Error())
+			}
+			continue
+		}
 		if auth.Metadata == nil {
 			auth.Metadata = map[string]any{}
 		}
@@ -815,6 +835,99 @@ func isCompatAuth(auth *coreauth.Auth) bool {
 		return true
 	}
 	return auth.Attributes != nil && strings.TrimSpace(auth.Attributes["compat_name"]) != ""
+}
+
+// credentialFilePath returns the credential's JSON file, or "" when it has none.
+func credentialFilePath(auth *coreauth.Auth, authDir string) string {
+	if auth == nil {
+		return ""
+	}
+	candidates := []string{}
+	if auth.Attributes != nil {
+		candidates = append(candidates, strings.TrimSpace(auth.Attributes[coreauth.AttributePath]))
+	}
+	if name := strings.TrimSpace(auth.FileName); name != "" {
+		if filepath.IsAbs(name) {
+			candidates = append(candidates, name)
+		}
+		if dir, err := util.ResolveAuthDir(authDir); err == nil && dir != "" {
+			candidates = append(candidates, filepath.Join(dir, filepath.Base(name)))
+		}
+	}
+	for _, path := range candidates {
+		if path == "" || !strings.HasSuffix(strings.ToLower(path), ".json") {
+			continue
+		}
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path
+		}
+	}
+	return ""
+}
+
+// credentialExcludedModels returns the credential's own excluded_models: from its metadata,
+// or from its file when the credential keeps none in memory (plugin-parsed credentials).
+func credentialExcludedModels(auth *coreauth.Auth, authDir string) []string {
+	if auth == nil {
+		return nil
+	}
+	if metadataHasExcluded(auth) {
+		return authExcludedModels(auth)
+	}
+	path := credentialFilePath(auth, authDir)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var raw map[string]any
+	if json.Unmarshal(data, &raw) != nil {
+		return nil
+	}
+	return authExcludedModels(&coreauth.Auth{Metadata: raw})
+}
+
+func metadataHasExcluded(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	_, canonical := auth.Metadata["excluded_models"]
+	_, legacy := auth.Metadata["excluded-models"]
+	return canonical || legacy
+}
+
+// writeCredentialExcludedModels rewrites only excluded_models in a credential file, keeping
+// every other field and the file itself (same inode and mode).
+func writeCredentialExcludedModels(path string, models []string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err = json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("credential file is not a JSON object: %w", err)
+	}
+	delete(raw, "excluded-models")
+	if len(models) == 0 {
+		delete(raw, "excluded_models")
+	} else {
+		encoded, errMarshal := json.Marshal(models)
+		if errMarshal != nil {
+			return errMarshal
+		}
+		raw["excluded_models"] = encoded
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, info.Mode().Perm())
 }
 
 // authExcludedModels reads a credential's own excluded_models (canonical) or excluded-models.

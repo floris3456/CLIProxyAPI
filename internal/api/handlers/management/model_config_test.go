@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -233,5 +235,48 @@ func TestPatchModelConfigAPIKeyProvider(t *testing.T) {
 	kimi = h.cfg.OpenAICompatibility[0].Models[1]
 	if kimi.Alias != "" || kimi.DisplayName != "" || kimi.MaxContextLength != 0 || kimi.Thinking != nil {
 		t.Fatalf("kimi after clear = %+v", kimi)
+	}
+}
+
+// Plugin-parsed credentials (opencode-go) keep no metadata in memory: the exclusion list
+// lives only in the credential file, which the catalogue must read and the switch must edit.
+func TestModelConfigReadsAndEditsCredentialFileWithoutMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opencode-go-key-test.json")
+	original := `{"type":"mc-file","api_key":"secret-value","label":"L","excluded_models":["mc-file/a","mc-file/b"]}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: "mc-file-auth", Provider: "mc-file", FileName: "opencode-go-key-test.json"}); err != nil {
+		t.Fatal(err)
+	}
+	registry.RecordClientCandidates("mc-file-auth", []*registry.ModelInfo{{ID: "mc-file/a"}, {ID: "mc-file/b"}, {ID: "mc-file/c"}})
+	t.Cleanup(func() { registry.ForgetClientCandidates("mc-file-auth") })
+	h := &Handler{cfg: &config.Config{AuthDir: dir}, configFilePath: writeTestConfigFile(t), authManager: manager}
+
+	m := getCatalogue(t, h)
+	if m["mc-file|mc-file/a"].Enabled || m["mc-file|mc-file/b"].Enabled || !m["mc-file|mc-file/c"].Enabled {
+		t.Fatalf("catalogue = %+v, want a and b off (from the file), c on", m)
+	}
+	if code, body := patchModel(t, h, `{"channel":"mc-file","model":"mc-file/a","enabled":true}`); code != http.StatusOK {
+		t.Fatalf("enable: %d %s", code, body)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err = json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["api_key"] != "secret-value" || got["label"] != "L" || got["type"] != "mc-file" {
+		t.Fatalf("other credential fields changed: %v", got)
+	}
+	if list, _ := got["excluded_models"].([]any); len(list) != 1 || list[0] != "mc-file/b" {
+		t.Fatalf("excluded_models = %v, want [mc-file/b]", got["excluded_models"])
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Fatalf("file mode changed to %v", info.Mode().Perm())
 	}
 }
