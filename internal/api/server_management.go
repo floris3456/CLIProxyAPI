@@ -177,6 +177,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-settings", s.mgmt.PatchOAuthSettings)
 		mgmt.DELETE("/oauth-settings", s.mgmt.DeleteOAuthSettings)
 		mgmt.GET("/oauth-settings/models", s.mgmt.GetOAuthSettingsModels)
+		mgmt.PATCH("/model-config", s.mgmt.PatchModelConfig)
 
 		mgmt.GET("/oauth-request-scoped-errors", s.mgmt.GetOAuthRequestScopedErrors)
 		mgmt.PUT("/oauth-request-scoped-errors", s.mgmt.PutOAuthRequestScopedErrors)

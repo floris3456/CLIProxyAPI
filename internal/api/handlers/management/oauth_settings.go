@@ -4,13 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // oauth-settings: map[string][]OAuthModelSetting (per-channel model overrides for OAuth credentials).
@@ -212,148 +209,6 @@ func (h *Handler) DeleteOAuthSettings(c *gin.Context) {
 	}
 	h.cfg.OAuthSettings = sanitizedOAuthSettings(next)
 	h.persistLocked(c)
-}
-
-// oauthSettingsModel is one model served through an OAuth channel, with the limits CPA
-// currently reports for it and the configured setting that applies (if any).
-type oauthSettingsModel struct {
-	Channel             string                    `json:"channel"`
-	ID                  string                    `json:"id"`
-	Name                string                    `json:"name"`
-	DisplayName         string                    `json:"display_name,omitempty"`
-	Kind                string                    `json:"kind"`
-	ContextLength       int                       `json:"context_length,omitempty"`
-	InputLength         int                       `json:"input_length,omitempty"`
-	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
-	Reasoning           *oauthSettingsReasoning   `json:"reasoning,omitempty"`
-	Setting             *config.OAuthModelSetting `json:"setting"`
-}
-
-type oauthSettingsReasoning struct {
-	Mode   string   `json:"mode"`
-	Levels []string `json:"levels,omitempty"`
-}
-
-// detailEntry mirrors the fields of the details catalogue this view needs.
-type detailEntry struct {
-	ID                  string                  `json:"id"`
-	DisplayName         string                  `json:"display_name"`
-	Kind                string                  `json:"kind"`
-	ContextLength       int                     `json:"context_length"`
-	InputLength         int                     `json:"input_length"`
-	MaxCompletionTokens int                     `json:"max_completion_tokens"`
-	Reasoning           *oauthSettingsReasoning `json:"reasoning"`
-}
-
-// GetOAuthSettingsModels lists the models of every OAuth channel with their current
-// (effective) limits, the configured settings and the thinking level names CPA accepts.
-func (h *Handler) GetOAuthSettingsModels(c *gin.Context) {
-	h.mu.Lock()
-	settings := cloneOAuthSettings(h.cfg.OAuthSettings)
-	manager := h.authManager
-	detailsProvider := h.modelDetails
-	h.mu.Unlock()
-
-	details := map[string]detailEntry{}
-	hash := ""
-	if detailsProvider != nil {
-		doc := detailsProvider()
-		hash, _ = doc["hash"].(string)
-		if encoded, errMarshal := json.Marshal(doc["data"]); errMarshal == nil {
-			var list []detailEntry
-			if errUnmarshal := json.Unmarshal(encoded, &list); errUnmarshal == nil {
-				for _, entry := range list {
-					details[entry.ID] = entry
-				}
-			}
-		}
-	}
-
-	channels := map[string]bool{}
-	for channel := range settings {
-		channels[channel] = true
-	}
-	seen := map[string]bool{}
-	models := make([]oauthSettingsModel, 0)
-	if manager != nil {
-		modelRegistry := registry.GetGlobalRegistry()
-		for _, auth := range manager.List() {
-			if auth == nil || auth.Disabled {
-				continue
-			}
-			channel := coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())
-			if channel == "" {
-				continue
-			}
-			channels[channel] = true
-			prefix := strings.Trim(strings.TrimSpace(auth.Prefix), "/")
-			for _, info := range modelRegistry.GetModelsForClient(auth.ID) {
-				if info == nil || strings.TrimSpace(info.ID) == "" {
-					continue
-				}
-				key := channel + "\x00" + info.ID
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				name := info.ID
-				if prefix != "" {
-					name = strings.TrimPrefix(name, prefix+"/")
-				}
-				model := oauthSettingsModel{
-					Channel:             channel,
-					ID:                  info.ID,
-					Name:                name,
-					DisplayName:         info.DisplayName,
-					Kind:                "chat",
-					ContextLength:       info.ContextLength,
-					MaxCompletionTokens: info.MaxCompletionTokens,
-				}
-				if info.MaxContextLength > 0 {
-					model.ContextLength = info.MaxContextLength
-				}
-				if info.Type == registry.OpenAIImageModelType {
-					model.Kind = "image"
-				}
-				if detail, ok := details[info.ID]; ok {
-					model.DisplayName = detail.DisplayName
-					model.Kind = detail.Kind
-					model.ContextLength = detail.ContextLength
-					model.InputLength = detail.InputLength
-					model.MaxCompletionTokens = detail.MaxCompletionTokens
-					model.Reasoning = detail.Reasoning
-				}
-				if setting := config.ResolveOAuthModelSetting(settings[channel], name, info.MetadataModelID, info.Name); setting != nil {
-					copied := *setting
-					copied.ThinkingLevels = append([]string(nil), setting.ThinkingLevels...)
-					model.Setting = &copied
-				}
-				models = append(models, model)
-			}
-		}
-	}
-	sort.Slice(models, func(i, j int) bool {
-		if models[i].Channel != models[j].Channel {
-			return models[i].Channel < models[j].Channel
-		}
-		return models[i].ID < models[j].ID
-	})
-	channelList := make([]string, 0, len(channels))
-	for channel := range channels {
-		channelList = append(channelList, channel)
-	}
-	sort.Strings(channelList)
-	if settings == nil {
-		settings = map[string][]config.OAuthModelSetting{}
-	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{
-		"channels":        channelList,
-		"models":          models,
-		"oauth-settings":  settings,
-		"thinking-levels": append([]string(nil), config.OAuthSettingThinkingLevels...),
-		"details-hash":    hash,
-	})
 }
 
 func normalizeOAuthSettingsChannel(raw string) string {

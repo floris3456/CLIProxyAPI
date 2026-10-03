@@ -53,6 +53,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
 	// Writes use the generic /config/oauth/settings path; this is the read view with live limits.
 	v8.GET("/oauth/settings/models", s.mgmt.GetOAuthSettingsModels)
+	v8.PATCH("/models/config", s.mgmt.PatchModelConfig)
 	v8.DELETE("/oauth/session", s.mgmt.CancelAuthSession)
 
 	v8.GET("/plugins", s.mgmt.ListPlugins)
