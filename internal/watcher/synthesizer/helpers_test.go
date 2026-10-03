@@ -319,3 +319,17 @@ func TestAddRequestRetryToMetadata(t *testing.T) {
 
 	addRequestRetryToMetadata(&positive, nil)
 }
+
+func TestApplyAuthExcludedModelsMeta_ClearsStaleListWhenNothingIsExcluded(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"excluded_models": "old-model", "excluded_models_hash": "stale"},
+	}
+	ApplyAuthExcludedModelsMeta(auth, &config.Config{}, nil, "oauth")
+	if _, ok := auth.Attributes["excluded_models"]; ok {
+		t.Fatalf("stale excluded_models kept: %q", auth.Attributes["excluded_models"])
+	}
+	if _, ok := auth.Attributes["excluded_models_hash"]; ok {
+		t.Fatalf("stale excluded_models_hash kept")
+	}
+}
