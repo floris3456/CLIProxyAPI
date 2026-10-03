@@ -172,6 +172,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/oauth-settings", s.mgmt.GetOAuthSettings)
+		mgmt.PUT("/oauth-settings", s.mgmt.PutOAuthSettings)
+		mgmt.PATCH("/oauth-settings", s.mgmt.PatchOAuthSettings)
+		mgmt.DELETE("/oauth-settings", s.mgmt.DeleteOAuthSettings)
+		mgmt.GET("/oauth-settings/models", s.mgmt.GetOAuthSettingsModels)
+
 		mgmt.GET("/oauth-request-scoped-errors", s.mgmt.GetOAuthRequestScopedErrors)
 		mgmt.PUT("/oauth-request-scoped-errors", s.mgmt.PutOAuthRequestScopedErrors)
 		mgmt.PATCH("/oauth-request-scoped-errors", s.mgmt.PatchOAuthRequestScopedErrors)

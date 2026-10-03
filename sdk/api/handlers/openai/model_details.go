@@ -63,6 +63,11 @@ type ModelDetail struct {
 // standardLevels is the order effort levels are reported in.
 var standardLevels = []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh", "max"}
 
+// ModelDetails returns the /v1/models?details=true document (used by the management API).
+func (h *OpenAIAPIHandler) ModelDetails() map[string]any {
+	return h.modelDetailsResponse()
+}
+
 func (h *OpenAIAPIHandler) modelDetailsResponse() map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
 	codexCatalogue := h.codexClientModelsResponse("")

@@ -61,6 +61,8 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	// modelDetails returns the /v1/models?details=true document (effective model limits).
+	modelDetails func() map[string]any
 }
 
 type configReloadSnapshot struct {
@@ -148,6 +150,17 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	}
 	h.mu.Lock()
 	h.pluginHost = host
+	h.mu.Unlock()
+}
+
+// SetModelDetailsProvider sets the source of the effective model details catalogue
+// (the /v1/models?details=true document) used by the oauth-settings models view.
+func (h *Handler) SetModelDetailsProvider(provider func() map[string]any) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.modelDetails = provider
 	h.mu.Unlock()
 }
 
