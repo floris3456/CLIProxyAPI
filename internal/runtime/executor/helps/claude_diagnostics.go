@@ -271,11 +271,13 @@ func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) 
 	if !okPin {
 		evictClaudeSessionDatePinsLocked()
 	}
+	previous := pin.date
 	if !okPin || now.After(pin.expiresAt) {
 		pin.date = date
 	}
 	pin.expiresAt = now.Add(retention)
 	claudeDiagnosticsState.datePins[pinKey] = pin
+	scheduleClaudeDatePinFlushLocked(now, !okPin || pin.date != previous)
 	return pin.date
 }
 
@@ -444,6 +446,10 @@ func resetClaudeDiagnosticsForTest() {
 	claudeDiagnosticsState.lastCleanup = time.Time{}
 	claudeDiagnosticsState.nextSequence = 0
 	claudeDiagnosticsState.nextAccess = 0
+	claudeDatePinPersistence.path = ""
+	claudeDatePinPersistence.dirty = false
+	claudeDatePinPersistence.flushing = false
+	claudeDatePinPersistence.flushedAt = time.Time{}
 }
 
 // IsClaudeNewPromptTurn inspects the request messages to determine whether

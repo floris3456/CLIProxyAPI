@@ -3,11 +3,13 @@ package cliproxy
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
@@ -661,6 +663,29 @@ func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.Cooldow
 		return nil
 	}
 	return coreauth.NewFileCooldownStateStoreWithAuthDir(authDir, authDir)
+}
+
+// claudeDatePinFileName holds cloaked Claude session date pins next to the
+// credentials. It is not a .json file, so the auth watcher ignores it.
+const claudeDatePinFileName = "claude-session-date-pins.state"
+
+// configureClaudeDatePinStore keeps session date pins across restarts, so a
+// restart after midnight does not re-date the open Claude chats.
+func (s *Service) configureClaudeDatePinStore(cfg *config.Config) {
+	if cfg == nil || cfg.Home.Enabled || cfg.Claude.SessionDatePinRetention() <= 0 {
+		return
+	}
+	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
+	if errResolve != nil {
+		log.Warnf("failed to resolve Claude date pin directory: %v", errResolve)
+		return
+	}
+	if authDir == "" {
+		return
+	}
+	if errEnable := helps.EnableClaudeSessionDatePinPersistence(filepath.Join(authDir, claudeDatePinFileName)); errEnable != nil {
+		log.Warnf("failed to restore Claude session date pins: %v", errEnable)
+	}
 }
 
 func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {

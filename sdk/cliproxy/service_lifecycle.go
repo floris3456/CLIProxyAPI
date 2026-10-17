@@ -82,6 +82,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
+	s.configureClaudeDatePinStore(cfg)
 
 	s.loadRuntimeAuth(ctx)
 	if s.coreManager != nil && !homeEnabled {
