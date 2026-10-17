@@ -61,6 +61,7 @@ type pluginLoadResult struct {
 }
 
 type Host struct {
+	cachePolicyRequests    map[string]*cachePolicyRequestFlight
 	applyMu                chan struct{}
 	mu                     sync.Mutex
 	loader                 pluginLoader

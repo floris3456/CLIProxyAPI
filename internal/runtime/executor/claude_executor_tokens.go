@@ -52,7 +52,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
@@ -129,6 +129,7 @@ func shouldUseClaudeUpstreamTokenCount(apiKey, baseURL string) bool {
 
 // countTokensUpstream preserves Anthropic's native token-counting contract.
 func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	helps.NoteUnsupportedClaudeHTTP(auth, "count_tokens_upstream")
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
 
@@ -169,7 +170,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
@@ -212,6 +213,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
 	body = applyClaudePreservedThinkingBinding(body)
 	body = stripPromptCacheOptions(body)
+	body = relaxForcedToolChoiceForModel(body)
 	// Two different reasons converge on the same deletions, and they must stay
 	// separable.
 	//

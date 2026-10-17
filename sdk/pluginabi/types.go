@@ -17,7 +17,9 @@ const (
 	// Version 6 preserves raw JSON bodies for plugin management responses.
 	// Plugins that still require HTML entity escaping on JSON response strings
 	// should keep schema_version < 6.
-	SchemaVersion uint32 = 6
+	// Version 7 adds narrow Pacer cache-policy dispatch/resolution and attempt usage evidence.
+	SchemaVersion            uint32 = 7
+	SchemaVersionCachePolicy uint32 = 7
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -79,7 +81,10 @@ const (
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
 
-	MethodUsageHandle = "usage.handle"
+	MethodUsageHandle        = "usage.handle"
+	MethodCachePolicyHandle  = "cache_policy.handle"
+	MethodCachePolicyResolve = "cache_policy.resolve"
+	MethodCachePolicyAttempt = "cache_policy.attempt"
 
 	MethodCommandLineRegister = "command_line.register"
 	MethodCommandLineExecute  = "command_line.execute"

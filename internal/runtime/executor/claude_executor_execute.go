@@ -38,8 +38,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Default API-key and delegated-provider requests preserve the caller body.
 	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, url)
 
-	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter := helps.NewClaudeHTTPUsageReporter(ctx, e, baseModel, auth, url, apiKey)
+	reporter.SetExecutionPolicy(opts)
+	defer reporter.EnsurePublished(ctx)
 	defer reporter.TrackFailure(ctx, &err)
+	if err = reporter.BeginPolicyAttempt(ctx); err != nil {
+		return resp, err
+	}
+	defer func() {
+		if errFinish := reporter.FinishPolicyAttempt(ctx, err); errFinish != nil && err == nil {
+			err = errFinish
+		}
+	}()
 	if upstreamModel != baseModel {
 		reporter.SetUpstreamModel(upstreamModel)
 	}
@@ -90,7 +100,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) || translatedMidSystemNeedsTopLevel(from, body) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
@@ -147,6 +157,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	body = ensureModelMaxTokens(body, baseModel)
 
+	body = relaxForcedToolChoiceForModel(body)
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
@@ -253,6 +264,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	extraBetas, bodyForUpstream = extractAndRemoveBetas(bodyForUpstream)
 	bodyForUpstream = stripPromptCacheOptions(bodyForUpstream)
+	// A managed cache policy rewrites the final markers; signing below covers the enforced body.
+	bodyForUpstream, err = helps.EnforceClaudeCachePolicy(bodyForUpstream, opts, url)
+	if err != nil {
+		return resp, err
+	}
 	if cchSigning {
 		bodyForUpstream, err = signAnthropicMessagesBody(bodyForUpstream)
 		if err != nil {
@@ -284,6 +300,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, errHeaders
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
+	if errPolicy := helps.FinalizeClaudeCachePolicyHeaders(httpReq, bodyForUpstream, opts, reporter); errPolicy != nil {
+		return resp, errPolicy
+	}
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
@@ -298,7 +317,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = helps.CachePolicyHTTPClient(httpClient, opts)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	if errPolicy := reporter.ValidatePolicyAttempt(ctx); errPolicy != nil {
+		return resp, errPolicy
+	}
+	reporter.MarkCachePolicyDispatch()
 	httpResp, err := doClaudeUpstreamRequest(httpClient, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -321,6 +345,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, errClassified
 		}
 		b, readErr := io.ReadAll(errBody)
+		errorUsage := helps.ParseClaudeUsage(b)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -333,9 +358,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("response body close error: %v", errClose)
 		}
 		if fastRequest {
-			return resp, newClaudeFastDirectResponseError(httpResp, b)
+			errFast := newClaudeFastDirectResponseError(httpResp, b)
+			reporter.PublishFailureWithDetail(ctx, errorUsage, errFast)
+			return resp, errFast
 		}
-		return resp, classifyClaudeUpstreamErrorWithCooling(httpResp.StatusCode, httpResp.Header, b, e.modelLevelCooling())
+		errUpstream := classifyClaudeUpstreamErrorWithCooling(httpResp.StatusCode, httpResp.Header, b, e.modelLevelCooling())
+		reporter.PublishFailureWithDetail(ctx, errorUsage, errUpstream)
+		return resp, errUpstream
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 	if err != nil {
@@ -350,16 +379,38 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
+	var streamUsage helps.StreamUsageBuffer
+	var upstreamMessageID string
+	upstreamCompleted := false
 	data, err := io.ReadAll(decodedBody)
+	if upstreamStream {
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			streamUsage.ObserveClaudeStream(line)
+			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+		}
+	}
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		if upstreamStream {
+			streamUsage.PublishFailure(ctx, reporter, err)
+		} else {
+			reporter.PublishFailureWithDetail(ctx, helps.ParseClaudeUsage(data), err)
+		}
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	var streamUsage helps.StreamUsageBuffer
 	if upstreamStream {
+		if !upstreamCompleted {
+			reporter.MarkUsageSourceIncomplete()
+		}
+		if opts.CachePolicy != nil && !upstreamCompleted {
+			errIncomplete := statusErr{code: http.StatusBadGateway, msg: "managed Claude stream ended before message completion"}
+			streamUsage.PublishFailure(ctx, reporter, errIncomplete)
+			return resp, errIncomplete
+		}
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
+			streamUsage.PublishFailure(ctx, reporter, errValidate)
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errValidate)
 		}
 		if msgID := claudeMessageIDFromSSE(data); msgID != "" {
@@ -369,7 +420,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
 			reporter.ObserveResponseModel(line)
-			streamUsage.ObserveClaudeStream(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
@@ -381,6 +431,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
+		if !gjson.ValidBytes(data) || gjson.GetBytes(data, "type").String() != "message" || gjson.GetBytes(data, "stop_reason").String() == "" {
+			reporter.MarkUsageSourceIncomplete()
+		}
 		messageID := claudeMessageIDFromResponse(data)
 		commitClaudeContinuity(diagnosticsState, messageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
 		e.rememberClaudeOAuthToolAliases(body, oauthToolNamesReverseMap, messageID)

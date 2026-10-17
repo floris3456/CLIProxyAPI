@@ -41,6 +41,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetLifecycleRequestID(opts.LifecycleRequestID)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat

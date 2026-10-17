@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -893,6 +894,36 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// claudeModelRejectsForcedToolChoice reports models that return 400 for
+// tool_choice type "any" or "tool" on both Messages and count_tokens.
+// See: https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5#forced-tool-use-is-not-supported
+func claudeModelRejectsForcedToolChoice(model string) bool {
+	model = claudeCanonicalModel(model)
+	return strings.HasPrefix(model, "claude-opus-5-5") || strings.HasPrefix(model, "claude-fable-5-1")
+}
+
+// relaxForcedToolChoiceForModel downgrades a forced tool_choice to "auto" for
+// models that reject forced tool use. disable_parallel_tool_use is preserved.
+// It must run before disableThinkingIfToolChoiceForced: these models keep
+// thinking always on, so thinking controls stay in place.
+func relaxForcedToolChoiceForModel(body []byte) []byte {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType != "any" && toolChoiceType != "tool" {
+		return body
+	}
+	model := gjson.GetBytes(body, "model").String()
+	if !claudeModelRejectsForcedToolChoice(model) {
+		return body
+	}
+	log.WithFields(log.Fields{
+		"model":       model,
+		"tool_choice": toolChoiceType,
+	}).Debug("claude: forced tool_choice not supported by model, downgraded to auto")
+	body, _ = sjson.SetBytes(body, "tool_choice.type", "auto")
+	body, _ = sjson.DeleteBytes(body, "tool_choice.name")
+	return body
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
@@ -1691,6 +1722,16 @@ func claudePayloadHasMidSystemMessage(payload []byte) bool {
 	return found
 }
 
+// translatedMidSystemNeedsTopLevel reports whether a translated request carries
+// positional role=system messages that its model cannot accept. Translators keep
+// later system and developer items in place so appending one does not rewrite
+// the cached prompt prefix; legacy models have no mid-conversation system slot,
+// so those requests keep the previous top-level placement. Native Claude
+// callers own their wire and are validated separately.
+func translatedMidSystemNeedsTopLevel(from sdktranslator.Format, payload []byte) bool {
+	return from != sdktranslator.FormatClaude && claudeUsesLegacySystemReminder(payload) && claudePayloadHasMidSystemMessage(payload)
+}
+
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
@@ -2487,6 +2528,34 @@ func recordPassthroughMCPTools(recordRename func(original, renamed string), forw
 	}
 }
 
+// resolveBareAlias recovers a tool name from which the model dropped the
+// "mcp__<server>__" prefix, e.g. "upset_write" for "mcp__cheese_dream__upset_write".
+// It only matches the exact "<toolID>_<semantic>" tail of exactly one
+// request-local alias, and never a name the caller itself declared.
+func (resolver claudeMCPAliasResolver) resolveBareAlias(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	for _, original := range resolver.exact {
+		if original == name {
+			return "", false
+		}
+	}
+	matchedOriginal := ""
+	matches := 0
+	for _, entry := range resolver.aliases {
+		if entry.parts.toolID+"_"+entry.parts.semantic == name {
+			matchedOriginal = entry.original
+			matches++
+		}
+	}
+	if matches != 1 {
+		return "", false
+	}
+	log.Infof("claude oauth mcp alias: recovered tool name %q without its server prefix as %q", name, matchedOriginal)
+	return matchedOriginal, true
+}
+
 func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error) {
 	if original, ok := resolver.exact[name]; ok {
 		if original == name {
@@ -2497,6 +2566,11 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 	}
 
 	server := claudeMCPAliasServer(name)
+	if server == "" {
+		if original, ok := resolver.resolveBareAlias(name); ok {
+			return original, true, nil
+		}
+	}
 	if _, known := resolver.servers[server]; !known {
 		return "", false, nil
 	}

@@ -95,6 +95,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.ModelRegistrar {
 		plugin.Capabilities.ModelRegistrar = adapter
 	}
+	if resp.Capabilities.CachePolicy && schemaVersion >= pluginabi.SchemaVersionCachePolicy {
+		plugin.Capabilities.CachePolicy = adapter
+	}
 	if resp.Capabilities.ModelProvider {
 		plugin.Capabilities.ModelProvider = adapter
 	}
@@ -603,9 +606,15 @@ func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.Thi
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
-	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
+	if errCall := a.HandleUsageAcknowledged(ctx, record); errCall != nil {
 		log.Debugf("pluginhost: usage.handle to %s failed: %v", a.id, errCall)
 	}
+}
+
+// Unlike the legacy void API, persistence/RPC failure reaches delivery diagnostics.
+func (a *rpcPluginAdapter) HandleUsageAcknowledged(ctx context.Context, record pluginapi.UsageRecord) error {
+	_, err := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record)
+	return err
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(ctx context.Context, req pluginapi.CommandLineRegistrationRequest) (pluginapi.CommandLineRegistrationResponse, error) {

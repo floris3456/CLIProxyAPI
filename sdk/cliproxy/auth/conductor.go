@@ -167,6 +167,12 @@ type resultPolicyHolder struct {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
+	// catalogLoad is published only by actual store loading, never a trust setter.
+	catalogLoad               atomic.Pointer[authCatalogLoad]
+	catalogLoadMu             sync.Mutex   // Serializes Load without blocking catalog callbacks.
+	catalogStartMu            sync.RWMutex // Orders snapshots against the start of store I/O.
+	quotaRecoveryProofs       map[string]map[string]quotaRecoveryProof
+	quotaRecoveryInstance     string
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
@@ -242,6 +248,10 @@ type Manager struct {
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted
+
+	// authInventory is the in-memory first-party Claude membership ledger, mutated under mu.
+	inventoryOnce sync.Once
+	authInventory *authInventory
 }
 
 // NewManager constructs a manager with optional custom selector and hook.

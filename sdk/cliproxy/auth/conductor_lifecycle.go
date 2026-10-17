@@ -110,11 +110,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
+	accountObservation := takeProviderAccountObservation(auth)
 	m.mu.Lock()
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
 	}
-	if existing, exists := m.auths[auth.ID]; exists && existing != nil && existing.RegistrationEpoch > m.authEpochs[auth.ID] {
+	existing := m.auths[auth.ID]
+	if existing != nil && existing.RegistrationEpoch > m.authEpochs[auth.ID] {
 		m.authEpochs[auth.ID] = existing.RegistrationEpoch
 	}
 	if auth.RegistrationEpoch > m.authEpochs[auth.ID] {
@@ -146,6 +148,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		schedulerSnapshot = authClone.Clone()
 	}
+	m.noteInventoryLocked(auth.ID, existing, authClone, accountObservation, false)
 	m.mu.Unlock()
 	releaseMutation()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
@@ -241,6 +244,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
 	}
+	accountObservation := takeProviderAccountObservation(auth)
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
@@ -390,6 +394,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)
+	m.noteInventoryLocked(auth.ID, existing, authClone, accountObservation, false)
 	// Snapshot before unlocking: MarkResult mutates the published auth in place.
 	var schedulerSnapshot *Auth
 	if m.scheduler != nil {
@@ -423,6 +428,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
 	m.notifyAuthChangeLocked(id)
+	delete(m.quotaRecoveryProofs, id)
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
 	}
@@ -443,6 +449,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	m.authEpochs[id]++
 	tombstoneEpoch := m.authEpochs[id]
+	m.noteInventoryLocked(id, existing, nil, nil, false)
 	m.mu.Unlock()
 	releaseMutation()
 
@@ -490,14 +497,32 @@ func (m *Manager) Load(ctx context.Context) error {
 		return errAcquire
 	}
 	defer m.authLoadGate.Release(math.MaxInt64)
-	m.mu.RLock()
+	// Catalog readers see the prior entries while the store is read without m.mu.
+	m.catalogLoadMu.Lock()
+	defer m.catalogLoadMu.Unlock()
+	m.catalogStartMu.Lock()
+	m.mu.Lock()
+	generation := uint64(1)
+	if old := m.catalogLoad.Load(); old != nil {
+		generation = old.generation + 1
+	}
+	prior := make([]*Auth, 0, len(m.auths))
+	for _, a := range m.auths {
+		if a != nil {
+			prior = append(prior, a.Clone())
+		}
+	}
+	m.catalogLoad.Store(&authCatalogLoad{state: "loading", generation: generation, prior: prior})
+	m.catalogStartMu.Unlock()
 	store := m.store
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	if store == nil {
+		m.catalogLoad.Store(&authCatalogLoad{state: "ready", generation: generation})
 		return nil
 	}
 	items, err := store.List(ctx)
 	if err != nil {
+		m.catalogLoad.Store(&authCatalogLoad{state: "failed", generation: generation, prior: prior})
 		return err
 	}
 	m.mu.Lock()
@@ -527,7 +552,10 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth.CredentialVersion == 0 {
 			auth.CredentialVersion = 1
 		}
-		m.auths[auth.ID] = auth.Clone()
+		takeProviderAccountObservation(auth)
+		stored := auth.Clone()
+		m.auths[auth.ID] = stored
+		m.noteInventoryLocked(auth.ID, previousAuths[auth.ID], stored, nil, true)
 	}
 
 	type removalTombstone struct {
@@ -542,6 +570,7 @@ func (m *Manager) Load(ctx context.Context) error {
 				id:    prevID,
 				epoch: m.authEpochs[prevID],
 			})
+			m.noteInventoryLocked(prevID, previousAuths[prevID], nil, nil, true)
 		}
 	}
 
@@ -553,6 +582,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	for id := range m.authChangeWatchers {
 		m.notifyAuthChangeLocked(id)
 	}
+	m.catalogLoad.Store(&authCatalogLoad{state: "ready", generation: generation})
 	m.mu.Unlock()
 
 	if m.scheduler != nil {

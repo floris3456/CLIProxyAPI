@@ -145,6 +145,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return nil, fmt.Errorf("host plugin callback instance is closed")
 	}
 	switch method {
+	case pluginabi.MethodHostUsageCheckpoint:
+		return h.callHostUsageCheckpoint(ctx, request)
+	case pluginabi.MethodHostUsageDelivery:
+		return h.callHostUsageDelivery(ctx, request)
 	case pluginabi.MethodHostModelExecute:
 		return h.callHostModelExecute(ctx, request)
 	case pluginabi.MethodHostModelExecuteStream:
@@ -173,6 +177,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostLog(ctx, request)
 	case pluginabi.MethodHostAuthList:
 		return h.callHostAuthList(ctx, request)
+	case pluginabi.MethodHostAuthInventoryCheckpoint:
+		return h.callHostAuthInventoryCheckpoint(ctx, request)
 	case pluginabi.MethodHostAuthGet:
 		return h.callHostAuthGet(ctx, request)
 	case pluginabi.MethodHostAuthGetRuntime:
@@ -183,6 +189,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAffinityLookup(ctx, request)
 	case pluginabi.MethodHostRoutingResetCooldown:
 		return h.callHostRoutingResetCooldown(ctx, request)
+	case pluginabi.MethodHostQuotaCooldownRead:
+		return h.callHostQuotaCooldownRead(ctx, request)
+	case pluginabi.MethodHostQuotaCooldownClear:
+		return h.callHostQuotaCooldownClear(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}

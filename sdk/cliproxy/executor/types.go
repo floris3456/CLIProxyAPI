@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -197,6 +198,14 @@ type WebSocketResponseObserver func(context.Context, WebSocketResponseEvent)
 
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
+	// CachePolicyProvider is the handler's pre-admission built-in provider determination.
+	CachePolicyProvider string
+	// CachePolicy is validated by the policy host before any interceptor can rewrite headers.
+	CachePolicy *pluginapi.CachePolicy
+	// CachePolicyAttempt synchronously admits, validates and settles a physical attempt.
+	CachePolicyAttempt func(context.Context, pluginapi.CachePolicyAttemptRequest) (pluginapi.CachePolicyAttemptResponse, error)
+	// LifecycleRequestID joins each physical attempt to interception/completion events.
+	LifecycleRequestID string
 	// Stream toggles streaming mode.
 	Stream bool
 	// Alt carries optional alternate format hint (e.g. SSE JSON key).

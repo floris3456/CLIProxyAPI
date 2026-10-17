@@ -1,8 +1,10 @@
 package usage
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/cachepolicy"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,6 +27,9 @@ const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
+	SourceEvidence     *pluginapi.UsageSourceEvidence
+	LifecycleRequestID string
+	CachePolicy        *pluginapi.CachePolicyEvidence
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
@@ -71,7 +78,8 @@ type Record struct {
 	Fail        Failure
 	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
-	ResponseHeaders http.Header
+	ResponseHeaders           http.Header
+	ResponseHeadersObservedAt map[string]time.Time
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
@@ -82,6 +90,7 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	CacheCreation       *pluginapi.CacheCreationUsage
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
@@ -403,29 +412,36 @@ type Plugin interface {
 }
 
 type queueItem struct {
-	ctx    context.Context
-	record Record
+	source   *sourceFlight
+	ctx      context.Context
+	record   Record
+	sequence uint64
+	delivery *deliveryEntry
 }
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
+	// Only the process-lifetime runtime singleton owns creation authority over
+	// built-in admissions. Arbitrary SDK managers cannot assert this property.
+	physicalAuthority bool
+	once              sync.Once
+	stopOnce          sync.Once
+	cancel            context.CancelFunc
+	done              chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
 	queue  []queueItem
 	closed bool
 
-	pluginsMu sync.RWMutex
-	plugins   []Plugin
-	named     map[string]int
+	delivery *deliveryState // protected by mu, including plugin registration/acks
+	plugins  []Plugin
+	named    map[string]int
 }
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -440,7 +456,13 @@ func (m *Manager) Start(ctx context.Context) {
 			ctx = context.Background()
 		}
 		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
+		workerCtx, cancel := context.WithCancel(ctx)
+		m.mu.Lock()
+		m.cancel = cancel
+		if m.closed {
+			cancel()
+		}
+		m.mu.Unlock()
 		go m.run(workerCtx)
 	})
 }
@@ -451,11 +473,12 @@ func (m *Manager) Stop() {
 		return
 	}
 	m.stopOnce.Do(func() {
+		m.mu.Lock()
 		if m.cancel != nil {
 			m.cancel()
 		}
-		m.mu.Lock()
 		m.closed = true
+		m.deliveryLocked().sequence++
 		m.mu.Unlock()
 		m.cond.Broadcast()
 	})
@@ -466,9 +489,9 @@ func (m *Manager) Register(plugin Plugin) {
 	if m == nil || plugin == nil {
 		return
 	}
-	m.pluginsMu.Lock()
+	m.mu.Lock()
 	m.plugins = append(m.plugins, plugin)
-	m.pluginsMu.Unlock()
+	m.mu.Unlock()
 }
 
 // RegisterNamed registers or replaces a plugin by name.
@@ -481,23 +504,29 @@ func (m *Manager) RegisterNamed(name string, plugin Plugin) {
 		return
 	}
 
-	m.pluginsMu.Lock()
+	m.mu.Lock()
 	if m.named == nil {
 		m.named = make(map[string]int)
 	}
 	if index, exists := m.named[name]; exists && index >= 0 && index < len(m.plugins) {
 		m.plugins[index] = plugin
-		m.pluginsMu.Unlock()
+		m.registerDeliveryLocked(index)
+		m.mu.Unlock()
 		return
 	}
 	m.named[name] = len(m.plugins)
+	m.registerDeliveryLocked(len(m.plugins))
 	m.plugins = append(m.plugins, plugin)
-	m.pluginsMu.Unlock()
+	m.mu.Unlock()
 }
 
 // Publish enqueues a usage record for processing. If no plugin is registered
 // the record will be discarded downstream.
 func (m *Manager) Publish(ctx context.Context, record Record) {
+	m.publish(ctx, record, nil, false)
+}
+
+func (m *Manager) publish(ctx context.Context, record Record, ticket *DeliveryTicket, final bool) {
 	if m == nil {
 		return
 	}
@@ -535,16 +564,19 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
+	sequence, delivery := m.deliveryPublishLocked(record, ticket, final)
+	source := m.sourcePublishLocked(&record, ticket, final)
 	if m.closed {
 		m.mu.Unlock()
 		return
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	m.queue = append(m.queue, queueItem{ctx: ctx, record: cloneRecord(record), sequence: sequence, delivery: delivery, source: source})
 	m.mu.Unlock()
 	m.cond.Signal()
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -555,38 +587,103 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
+		d := m.deliveryLocked()
+		d.sequence++
+		s := &d.sources[deliveryProvider(item.record.Provider)]
+		s.diag.Queued--
+		s.diag.Dispatching++
 		m.mu.Unlock()
 		m.dispatch(item)
+		m.mu.Lock()
+		d.sequence++
+		s.diag.Dispatching--
+		if item.delivery != nil {
+			heap.Remove(&s.pending, item.delivery.index)
+		}
+		m.sourceDequeuedLocked(item.source)
+		m.mu.Unlock()
 	}
 }
 
 func (m *Manager) dispatch(item queueItem) {
-	m.pluginsMu.RLock()
+	m.mu.Lock()
 	plugins := make([]Plugin, len(m.plugins))
 	copy(plugins, m.plugins)
-	m.pluginsMu.RUnlock()
+	incarnations := make([]string, len(plugins))
+	d := m.deliveryLocked()
+	for i := range plugins {
+		if sink := d.sinks[i]; sink != nil {
+			incarnations[i] = sink.incarnation
+		}
+	}
+	if len(plugins) == 0 {
+		d.sources[deliveryProvider(item.record.Provider)].diag.MissingSinkRecords++
+		d.sequence++
+		m.sourceFailureLocked(item.source, -1, "sink_missing", item.record.RequestedAt)
+	}
+	m.mu.Unlock()
 	if len(plugins) == 0 {
 		return
 	}
-	for _, plugin := range plugins {
+	for index, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		provider := deliveryProvider(item.record.Provider)
+		m.mu.Lock()
+		d.sequence++
+		if sink := d.sinks[index]; sink != nil {
+			v := &sink.diag[provider]
+			v.CallbackStarted++
+			v.CallbackInFlight++
+			if item.sequence < sink.registrationSequence || item.record.RequestedAt.Before(sink.registeredAt) {
+				v.PreRegistrationRecords++
+			}
+		}
+		m.mu.Unlock()
+		err := safeInvoke(plugin, item.ctx, cloneRecord(item.record))
+		m.acknowledgeDelivery(index, incarnations[index], provider, item.sequence, err)
+		m.mu.Lock()
+		m.sourceAcknowledgedLocked(item.source, index, incarnations[index], item.record.RequestedAt, err)
+		m.mu.Unlock()
 	}
 }
 
-func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
+func safeInvoke(plugin Plugin, ctx context.Context, record Record) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Errorf("usage: plugin panic recovered: %v", r)
+			err = fmt.Errorf("usage callback panicked")
 		}
 	}()
+	if ack, ok := plugin.(AcknowledgedPlugin); ok {
+		return ack.HandleUsageAcknowledged(ctx, record)
+	}
 	plugin.HandleUsage(ctx, record)
+	return ErrDeliveryUnacknowledged
 }
 
-var defaultManager = NewManager(512)
+func cloneRecord(record Record) Record {
+	record.SourceEvidence = CloneSourceEvidence(record.SourceEvidence)
+	record.CachePolicy = cachepolicy.CloneEvidence(record.CachePolicy)
+	record.Detail.CacheCreation = CloneCacheCreation(record.Detail.CacheCreation)
+	record.ResponseHeaders = record.ResponseHeaders.Clone()
+	record.ResponseHeadersObservedAt = maps.Clone(record.ResponseHeadersObservedAt)
+	if record.Generate != nil {
+		record.Generate = GenerateFlag(*record.Generate)
+	}
+	return record
+}
+
+var defaultManager = newRuntimeUsageManager()
+
+func newRuntimeUsageManager() *Manager {
+	m := NewManager(512)
+	m.physicalAuthority = true // fixed before any built-in executor can be invoked
+	return m
+}
 
 // DefaultManager returns the global usage manager instance.
 func DefaultManager() *Manager { return defaultManager }

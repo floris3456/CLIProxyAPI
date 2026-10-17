@@ -227,6 +227,8 @@ func MaskAuthorizationHeader(value string) string {
 func MaskSensitiveHeaderValue(key, value string) string {
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
 	switch {
+	case lowerKey == "x-pacer-cache-capability":
+		return "[REDACTED]"
 	case strings.Contains(lowerKey, "authorization"):
 		return MaskAuthorizationHeader(value)
 	case strings.Contains(lowerKey, "api-key"),
@@ -268,6 +270,9 @@ func MaskSensitiveQuery(raw string) string {
 			decodedValue = valuePart
 		}
 		masked := HideAPIKey(strings.TrimSpace(decodedValue))
+		if strings.Contains(strings.ToLower(decodedKey), "capability") {
+			masked = "[REDACTED]"
+		}
 		parts[i] = keyPart + "=" + url.QueryEscape(masked)
 		changed = true
 	}
@@ -288,7 +293,7 @@ func shouldMaskQueryParam(key string) bool {
 	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
-	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
+	if strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "capability") {
 		return true
 	}
 	return false

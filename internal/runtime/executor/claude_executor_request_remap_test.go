@@ -1161,3 +1161,72 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }
+
+// bareMCPAlias drops the "mcp__<server>__" prefix the way Opus sometimes does
+// ("mcp__cheese_dream__upset_write" -> "upset_write").
+func bareMCPAlias(t *testing.T, alias string) string {
+	t.Helper()
+	parts, ok := parseClaudeMCPAlias(alias)
+	if !ok {
+		t.Fatalf("parseClaudeMCPAlias(%q) failed", alias)
+	}
+	return parts.toolID + "_" + parts.semantic
+}
+
+func restoredToolNames(t *testing.T, reverseMap map[string]string, name string) (string, string) {
+	t.Helper()
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames(%q) error = %v", name, errReverse)
+	}
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, name))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine(%q) error = %v", name, errStream)
+	}
+	return gjson.GetBytes(restored, "content.0.name").String(),
+		gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String()
+}
+
+func TestReverseRemapOAuthToolNamesRecoversAliasWithoutServerPrefix(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"read","input_schema":{"type":"object"}},{"name":"write","input_schema":{"type":"object"}},{"name":"edit","input_schema":{"type":"object"}},{"name":"shell","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bare-alias-caller"})
+
+	for index, original := range []string{"read", "write", "edit", "shell"} {
+		alias := gjson.GetBytes(remapped, fmt.Sprintf("tools.%d.name", index)).String()
+		bare := bareMCPAlias(t, alias)
+		got, gotStream := restoredToolNames(t, reverseMap, bare)
+		if got != original || gotStream != original {
+			t.Fatalf("bare alias %q (from %q) restored to %q / stream %q, want %q", bare, alias, got, gotStream, original)
+		}
+	}
+
+	// Names that are not the bare form of a request-local alias stay untouched.
+	for _, name := range []string{"write", "shell", "nonexistent_tool", "write_file", "upset", ""} {
+		if name == "" {
+			continue
+		}
+		got, gotStream := restoredToolNames(t, reverseMap, name)
+		if got != name || gotStream != name {
+			t.Fatalf("unrelated name %q restored to %q / stream %q, want it unchanged", name, got, gotStream)
+		}
+	}
+}
+
+func TestReverseRemapOAuthToolNamesBareAliasNeverShadowsDeclaredTool(t *testing.T) {
+	const secret = "bare-alias-shadow-caller"
+	first, _ := remapOAuthToolNamesWithOptions([]byte(`{"tools":[{"name":"write","input_schema":{"type":"object"}}]}`), claudeMCPAliasOptions{secret: secret})
+	bare := bareMCPAlias(t, gjson.GetBytes(first, "tools.0.name").String())
+
+	// The caller declares a real tool whose name equals write's bare alias.
+	body := []byte(fmt.Sprintf(`{"tools":[{"name":"write","input_schema":{"type":"object"}},{"name":%q,"input_schema":{"type":"object"}}]}`, bare))
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+	if bareMCPAlias(t, gjson.GetBytes(remapped, "tools.0.name").String()) != bare {
+		t.Fatalf("write alias changed between requests; test precondition broken")
+	}
+	got, gotStream := restoredToolNames(t, reverseMap, bare)
+	if got != bare || gotStream != bare {
+		t.Fatalf("declared tool %q restored to %q / stream %q, want it unchanged", bare, got, gotStream)
+	}
+}

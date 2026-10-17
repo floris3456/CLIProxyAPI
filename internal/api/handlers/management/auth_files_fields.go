@@ -999,6 +999,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 					break
 				}
 			}
+			if accountUUID, observed := record.ProviderAccountObservation(); observed && persistedRecord != record {
+				persistedRecord.ObserveProviderAccount(accountUUID)
+			}
 		}
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)

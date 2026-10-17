@@ -72,6 +72,8 @@ type ConfigField struct {
 
 // Capabilities groups the optional host integration interfaces exposed by a plugin.
 type Capabilities struct {
+	// CachePolicy is the narrow inference-authenticated Pacer policy capability (schema 7).
+	CachePolicy CachePolicyProvider
 	// ModelRegistrar contributes development-time model metadata to the host registry.
 	ModelRegistrar ModelRegistrar
 	// ModelProvider contributes provider-native static and per-auth model metadata.
@@ -1413,10 +1415,14 @@ type ManagementAPI interface {
 type ManagementRegistrationRequest struct {
 	// Plugin is the metadata of the plugin being registered.
 	Plugin Metadata
-	// BasePath is the only Management API prefix plugins may register under.
+	// BasePath is the legacy Management API prefix for relative and v0 routes.
 	BasePath string
 	// ResourceBasePath is the plugin resource prefix for browser-navigable resources.
 	ResourceBasePath string
+	// PluginManagementBasePath advertises optional schema-7 scoped v8 management.
+	// When nonempty, plugins may declare full literal paths beneath this prefix.
+	// It is absent on older hosts; never infer support from SchemaVersion alone.
+	PluginManagementBasePath string `json:"PluginManagementBasePath,omitempty"`
 }
 
 // ManagementRegistrationResponse lists plugin-owned Management API and resource routes.
@@ -1432,6 +1438,8 @@ type ManagementRoute struct {
 	// Method is the HTTP method, for example GET or POST.
 	Method string
 	// Path is an exact path under /v0/management/. Relative paths are resolved under that prefix.
+	// Explicit v8 routes must be beneath the advertised PluginManagementBasePath;
+	// they require schema 7, a standard read/write method and an empty Menu.
 	Path string
 	// Menu is a legacy resource menu label. GET routes with Menu are registered under /v0/resource/plugins/<pluginID>/.
 	Menu string
@@ -1486,6 +1494,19 @@ type ManagementResponse struct {
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	SourceEvidence     *UsageSourceEvidence `json:"SourceEvidence,omitempty"`
+	LifecycleRequestID string
+	CachePolicy        *CachePolicyEvidence
+	AccountingVersion  int
+	TokenBreakdown     UsageTokenBreakdown
+	ClientIP           string
+	ResolvedClientIP   string
+	XForwardedFor      string
+	UserAgent          string
+	NodeKind           string
+	IsFork             bool
+	IsCompaction       bool
+	AccessTokenSHA256  string
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
@@ -1545,6 +1566,8 @@ type UsageRecord struct {
 	Detail UsageDetail
 	// ResponseHeaders contains selected upstream response headers.
 	ResponseHeaders http.Header
+	// ResponseHeadersObservedAt carries per-header transport/event observation clocks.
+	ResponseHeadersObservedAt map[string]time.Time
 }
 
 // UsageFailure describes an upstream or executor failure.
@@ -1557,6 +1580,7 @@ type UsageFailure struct {
 
 // UsageDetail contains token accounting counters.
 type UsageDetail struct {
+	CacheCreation *CacheCreationUsage
 	// InputTokens is the prompt or input token count.
 	InputTokens int64
 	// OutputTokens is the completion or output token count.

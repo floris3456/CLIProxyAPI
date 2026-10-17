@@ -56,6 +56,10 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 		}
 
 		for _, item := range resp.Routes {
+			if declaresManagementV8(item.Path) {
+				registerManagementV8Route(nextRoutes, reserved, record, item)
+				continue
+			}
 			method, path, okRoute := normalizeManagementRoute(item)
 			if !okRoute {
 				log.Warnf("pluginhost: plugin %s declared invalid management route %s %s", record.id, item.Method, item.Path)
@@ -112,9 +116,10 @@ func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRec
 		}
 	}()
 	return plugin.RegisterManagement(ctx, pluginapi.ManagementRegistrationRequest{
-		Plugin:           record.meta,
-		BasePath:         managementBasePath,
-		ResourceBasePath: resourcePluginBasePath + "/" + record.id,
+		Plugin:                   record.meta,
+		BasePath:                 managementBasePath,
+		ResourceBasePath:         resourcePluginBasePath + "/" + record.id,
+		PluginManagementBasePath: pluginManagementV8Base(record),
 	})
 }
 

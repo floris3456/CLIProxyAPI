@@ -172,6 +172,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/oauth-settings", s.mgmt.GetOAuthSettings)
+		mgmt.PUT("/oauth-settings", s.mgmt.PutOAuthSettings)
+		mgmt.PATCH("/oauth-settings", s.mgmt.PatchOAuthSettings)
+		mgmt.DELETE("/oauth-settings", s.mgmt.DeleteOAuthSettings)
+		mgmt.GET("/oauth-settings/models", s.mgmt.GetOAuthSettingsModels)
+		mgmt.PATCH("/model-config", s.mgmt.PatchModelConfig)
+
 		mgmt.GET("/oauth-request-scoped-errors", s.mgmt.GetOAuthRequestScopedErrors)
 		mgmt.PUT("/oauth-request-scoped-errors", s.mgmt.PutOAuthRequestScopedErrors)
 		mgmt.PATCH("/oauth-request-scoped-errors", s.mgmt.PatchOAuthRequestScopedErrors)
@@ -249,6 +256,7 @@ func (s *Server) registeredManagementRouteKeys() map[string]struct{} {
 			out[strings.ToUpper(strings.TrimSpace(route.Method))+" "+route.Path] = struct{}{}
 		}
 	}
+	s.collectManagementV8RouteKeys(out)
 	return out
 }
 
@@ -260,6 +268,10 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
+	if path == "/v8/management" || strings.HasPrefix(path, "/v8/management/") {
+		s.pluginManagementV8NoRoute(c)
+		return
+	}
 	if strings.HasPrefix(path, "/v0/resource/plugins/") {
 		s.pluginResourceNoRoute(c)
 		return

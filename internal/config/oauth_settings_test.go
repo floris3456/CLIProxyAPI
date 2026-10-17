@@ -231,3 +231,43 @@ func TestResolveOAuthModelSetting_Priority(t *testing.T) {
 		t.Fatalf("unknown model resolved to %+v, want nil", got)
 	}
 }
+
+func TestOAuthSettingsModelOverridesDecodeAndSanitize(t *testing.T) {
+	for name, raw := range map[string]string{
+		"v8": `
+config-version: 8
+oauth:
+  settings:
+    claude:
+      - name: "claude-opus-5-5"
+        max-output-tokens: 64000
+        display-name: " Opus (CPA) "
+        thinking-levels: ["HIGH", "low", "ultra", "medium", "low"]
+`,
+		"legacy": `
+oauth-settings:
+  claude:
+    - name: "claude-opus-5-5"
+      max-output-tokens: 64000
+      display-name: " Opus (CPA) "
+      thinking-levels: ["HIGH", "low", "ultra", "medium", "low"]
+`,
+	} {
+		var cfg config.Config
+		if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		cfg.SanitizeOAuthSettings()
+		got := cfg.OAuthSettings["claude"]
+		if len(got) != 1 {
+			t.Fatalf("%s: settings = %+v", name, cfg.OAuthSettings)
+		}
+		s := got[0]
+		if s.MaxOutputTokens != 64000 || s.DisplayName != "Opus (CPA)" || strings.Join(s.ThinkingLevels, ",") != "low,medium,high" {
+			t.Fatalf("%s: sanitized = %+v (unknown \"ultra\" dropped, levels ordered and de-duplicated)", name, s)
+		}
+		if !s.HasOverrides() {
+			t.Fatalf("%s: HasOverrides = false", name)
+		}
+	}
+}

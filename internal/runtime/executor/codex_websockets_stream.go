@@ -31,6 +31,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetLifecycleRequestID(opts.LifecycleRequestID)
 	defer reporter.TrackFailure(ctx, &err)
 
 	prepared, err := e.prepareCodexWebsocketStream(ctx, auth, req, opts)

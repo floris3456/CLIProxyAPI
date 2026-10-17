@@ -39,6 +39,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetLifecycleRequestID(opts.LifecycleRequestID)
+	deliveryHandedOff := false
+	defer func() {
+		if !deliveryHandedOff {
+			reporter.FinishUsageDelivery()
+		}
+	}()
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -401,8 +408,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			emittedCount++
 		}
 	}
+	deliveryHandedOff = true
 	go func() {
 		defer close(out)
+		defer reporter.FinishUsageDelivery()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)

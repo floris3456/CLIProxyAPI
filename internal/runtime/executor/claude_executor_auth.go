@@ -92,6 +92,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 		}
 		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
 		claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+		auth.ObserveProviderAccount("")
 		return auth, nil
 	}
 
@@ -108,6 +109,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 			}
 			claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
 			claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+			auth.ObserveProviderAccount("")
 			return auth, nil
 		}
 		return nil, fmt.Errorf("populate Claude OAuth account profile: %w", errProfile)
@@ -120,6 +122,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 		}
 		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
 		claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+		auth.ObserveProviderAccount("")
 		return auth, nil
 	}
 	claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", profile.Account.UUID)
@@ -127,6 +130,7 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", profile.Organization.UUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", profile.Organization.Name)
 	claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+	auth.ObserveProviderAccount(profile.Account.UUID)
 	return auth, nil
 }
 
@@ -166,6 +170,13 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if err != nil {
 		return nil, err
 	}
+	applyClaudeRefreshedTokens(auth, td)
+	return auth, nil
+}
+
+// applyClaudeRefreshedTokens stores a successful token refresh. td.AccountUUID is set only
+// when the refresh profile lookup returned one; otherwise the account is unverified.
+func applyClaudeRefreshedTokens(auth *cliproxyauth.Auth, td *claudeauth.ClaudeTokenData) {
 	claudeauth.EnsureMetadataMap(&auth.Metadata)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", td.AccessToken)
 	claudeauth.StoreMetadataString(&auth.Metadata, "refresh_token", td.RefreshToken)
@@ -178,5 +189,5 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	claudeauth.StoreMetadataValue(&auth.Metadata, "expired", td.Expire)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "type", "claude")
 	claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", time.Now().Format(time.RFC3339))
-	return auth, nil
+	auth.ObserveProviderAccount(td.AccountUUID)
 }

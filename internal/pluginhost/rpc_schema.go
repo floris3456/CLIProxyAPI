@@ -19,6 +19,7 @@ type rpcRegistration struct {
 }
 
 type rpcCapabilities struct {
+	CachePolicy                   bool                         `json:"cache_policy,omitempty"`
 	ModelRegistrar                bool                         `json:"model_registrar"`
 	ModelProvider                 bool                         `json:"model_provider"`
 	AuthProvider                  bool                         `json:"auth_provider"`
@@ -161,6 +162,7 @@ func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
 func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	caps := plugin.Capabilities
 	return rpcCapabilities{
+		CachePolicy:                   caps.CachePolicy != nil,
 		ModelRegistrar:                caps.ModelRegistrar != nil,
 		ModelProvider:                 caps.ModelProvider != nil,
 		AuthProvider:                  caps.AuthProvider != nil,

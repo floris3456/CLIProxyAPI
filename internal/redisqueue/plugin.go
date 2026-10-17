@@ -11,6 +11,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func init() {
@@ -104,6 +105,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
+		CacheCreation:          coreusage.CloneCacheCreation(usageDetail.CacheCreation),
 		InputTokens:            usageDetail.InputTokens,
 		OutputTokens:           usageDetail.OutputTokens,
 		ReasoningTokens:        usageDetail.ReasoningTokens,
@@ -126,25 +128,29 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	detail := requestDetail{
-		Timestamp:        timestamp,
-		LatencyMs:        record.Latency.Milliseconds(),
-		TTFTMs:           record.TTFT.Milliseconds(),
-		Source:           record.Source,
-		AuthIndex:        record.AuthIndex,
-		AccessTokenHash:  record.AccessTokenSHA256,
-		ClientIP:         clientRequestMetadata.ClientIP,
-		ResolvedClientIP: clientRequestMetadata.ResolvedClientIP,
-		XForwardedFor:    clientRequestMetadata.XForwardedFor,
-		UserAgent:        clientRequestMetadata.UserAgent,
-		Tokens:           tokens,
-		Failed:           failed,
-		Generate:         coreusage.GenerateEnabled(record.Generate),
-		Stream:           stream,
-		Fail:             fail,
-		ResponseHeaders:  record.ResponseHeaders,
+		Timestamp:                 timestamp,
+		LatencyMs:                 record.Latency.Milliseconds(),
+		TTFTMs:                    record.TTFT.Milliseconds(),
+		Source:                    record.Source,
+		AuthIndex:                 record.AuthIndex,
+		AccessTokenHash:           record.AccessTokenSHA256,
+		ClientIP:                  clientRequestMetadata.ClientIP,
+		ResolvedClientIP:          clientRequestMetadata.ResolvedClientIP,
+		XForwardedFor:             clientRequestMetadata.XForwardedFor,
+		UserAgent:                 clientRequestMetadata.UserAgent,
+		Tokens:                    tokens,
+		Failed:                    failed,
+		Generate:                  coreusage.GenerateEnabled(record.Generate),
+		Stream:                    stream,
+		Fail:                      fail,
+		ResponseHeaders:           record.ResponseHeaders,
+		ResponseHeadersObservedAt: record.ResponseHeadersObservedAt,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
+		LifecycleRequestID:  record.LifecycleRequestID,
+		CachePolicy:         record.CachePolicy,
+		SourceEvidence:      record.SourceEvidence,
 		requestDetail:       detail,
 		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 		TokenBreakdown:      usageDetail.TokenBreakdown,
@@ -177,6 +183,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
+	LifecycleRequestID string                         `json:"lifecycle_request_id,omitempty"`
+	CachePolicy        *pluginapi.CachePolicyEvidence `json:"cache_policy,omitempty"`
+	SourceEvidence     *pluginapi.UsageSourceEvidence `json:"source_evidence,omitempty"`
 	requestDetail
 	AccountingVersion   int                      `json:"accounting_version"`
 	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
@@ -204,33 +213,35 @@ type queuedUsageDetail struct {
 }
 
 type requestDetail struct {
-	Timestamp        time.Time   `json:"timestamp"`
-	LatencyMs        int64       `json:"latency_ms"`
-	TTFTMs           int64       `json:"ttft_ms"`
-	Source           string      `json:"source"`
-	AuthIndex        string      `json:"auth_index"`
-	AccessTokenHash  string      `json:"access_token_sha256,omitempty"`
-	ClientIP         string      `json:"client_ip"`
-	ResolvedClientIP string      `json:"resolved_client_ip"`
-	XForwardedFor    string      `json:"x_forwarded_for"`
-	UserAgent        string      `json:"user_agent"`
-	Tokens           tokenStats  `json:"tokens"`
-	Failed           bool        `json:"failed"`
-	Generate         bool        `json:"generate"`
-	Stream           bool        `json:"stream"`
-	Fail             failDetail  `json:"fail"`
-	ResponseHeaders  http.Header `json:"response_headers,omitempty"`
+	ResponseHeadersObservedAt map[string]time.Time `json:"response_headers_observed_at,omitempty"`
+	Timestamp                 time.Time            `json:"timestamp"`
+	LatencyMs                 int64                `json:"latency_ms"`
+	TTFTMs                    int64                `json:"ttft_ms"`
+	Source                    string               `json:"source"`
+	AuthIndex                 string               `json:"auth_index"`
+	AccessTokenHash           string               `json:"access_token_sha256,omitempty"`
+	ClientIP                  string               `json:"client_ip"`
+	ResolvedClientIP          string               `json:"resolved_client_ip"`
+	XForwardedFor             string               `json:"x_forwarded_for"`
+	UserAgent                 string               `json:"user_agent"`
+	Tokens                    tokenStats           `json:"tokens"`
+	Failed                    bool                 `json:"failed"`
+	Generate                  bool                 `json:"generate"`
+	Stream                    bool                 `json:"stream"`
+	Fail                      failDetail           `json:"fail"`
+	ResponseHeaders           http.Header          `json:"response_headers,omitempty"`
 }
 
 type tokenStats struct {
-	InputTokens            int64 `json:"input_tokens"`
-	OutputTokens           int64 `json:"output_tokens"`
-	ReasoningTokens        int64 `json:"reasoning_tokens"`
-	CachedTokens           int64 `json:"cached_tokens"`
-	CacheReadTokens        int64 `json:"cache_read_tokens"`
-	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
-	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
-	TotalTokens            int64 `json:"total_tokens"`
+	CacheCreation          *pluginapi.CacheCreationUsage `json:"cache_creation,omitempty"`
+	InputTokens            int64                         `json:"input_tokens"`
+	OutputTokens           int64                         `json:"output_tokens"`
+	ReasoningTokens        int64                         `json:"reasoning_tokens"`
+	CachedTokens           int64                         `json:"cached_tokens"`
+	CacheReadTokens        int64                         `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool                          `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64                         `json:"cache_creation_tokens"`
+	TotalTokens            int64                         `json:"total_tokens"`
 }
 
 type failDetail struct {

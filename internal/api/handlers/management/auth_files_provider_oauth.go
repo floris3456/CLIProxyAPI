@@ -174,6 +174,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
+		// The token exchange UUID came from Anthropic in this process (in-memory only).
+		record.ObserveProviderAccount(tokenStorage.AccountUUID)
 		if errGuard := guardOAuthSessionPendingForSave(state, "anthropic"); errGuard != nil {
 			return
 		}

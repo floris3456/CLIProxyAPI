@@ -241,12 +241,6 @@ func (b *Builder) Build() (*Service, error) {
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()
 	}
-	if b.cfg != nil {
-		pluginHost.ApplyConfig(context.Background(), b.cfg)
-		pluginHost.RegisterFrontendAuthProviders()
-	}
-	accessManager.SetProviders(sdkaccess.RegisteredProviders())
-
 	coreManager := b.coreManager
 	cooldownStateStore := b.cooldownStateStore
 	var appliedRoutingState *routingRuntimeState
@@ -275,6 +269,12 @@ func (b *Builder) Build() (*Service, error) {
 	if b.resultPolicy != nil {
 		coreManager.SetResultPolicy(b.resultPolicy)
 	}
+	// Bind the actual manager before callbacks during registration. Its catalog
+	// remains explicitly uninitialized until Run loads the store with plugin parsers.
+	pluginHost.SetAuthManager(coreManager)
+	pluginHost.ApplyConfig(context.Background(), b.cfg)
+	pluginHost.RegisterFrontendAuthProviders()
+	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
 	service := &Service{
 		cfg:                 b.cfg.CloneForRuntime(),

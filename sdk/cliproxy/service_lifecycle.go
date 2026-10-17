@@ -83,17 +83,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
 
-	s.registerPluginAuthParser()
+	s.loadRuntimeAuth(ctx)
 	if s.coreManager != nil && !homeEnabled {
-		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
-			log.Warnf("failed to load auth store: %v", errLoad)
-		}
-		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), cfg)
-		if cfg != nil && cfg.SaveCooldownStatus {
-			if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
-				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
-			}
-		}
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
@@ -241,6 +232,28 @@ func (s *Service) Run(ctx context.Context) error {
 		return ctx.Err()
 	case errServer := <-s.serverErr:
 		return errServer
+	}
+}
+
+// loadRuntimeAuth is the pre-network startup boundary. Plugin parsers must already
+// be registered; catalog readiness is derived by Manager.Load, including failure.
+func (s *Service) loadRuntimeAuth(ctx context.Context) {
+	if s.pluginHost != nil {
+		s.pluginHost.SetAuthManager(s.coreManager)
+	}
+	s.registerPluginAuthParser()
+	cfg := s.currentConfig()
+	if s.coreManager == nil || cfg != nil && cfg.Home.Enabled {
+		return
+	}
+	if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+		log.Warnf("failed to load auth store: %v", errLoad)
+	}
+	s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), cfg)
+	if cfg != nil && cfg.SaveCooldownStatus {
+		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
+			log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
+		}
 	}
 }
 

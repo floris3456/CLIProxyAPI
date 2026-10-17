@@ -2,9 +2,11 @@ package logging
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -30,8 +32,9 @@ type responseStatusHolder struct {
 }
 
 type responseHeadersHolder struct {
-	mu      sync.RWMutex
-	headers http.Header
+	mu         sync.RWMutex
+	headers    http.Header
+	observedAt map[string]time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -113,6 +116,10 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	setResponseHeadersAt(ctx, headers, time.Now())
+}
+
+func setResponseHeadersAt(ctx context.Context, headers http.Header, observedAt time.Time) {
 	if ctx == nil {
 		return
 	}
@@ -123,11 +130,19 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+	holder.observedAt = make(map[string]time.Time, len(headers))
+	for key := range headers {
+		holder.observedAt[http.CanonicalHeaderKey(key)] = observedAt
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
 // such as quota metadata delivered in a websocket event.
 func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	mergeResponseHeadersAt(ctx, headers, time.Now())
+}
+
+func mergeResponseHeadersAt(ctx context.Context, headers http.Header, observedAt time.Time) {
 	if ctx == nil || len(headers) == 0 {
 		return
 	}
@@ -140,12 +155,16 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	if holder.headers == nil {
 		holder.headers = make(http.Header, len(headers))
 	}
+	if holder.observedAt == nil {
+		holder.observedAt = make(map[string]time.Time)
+	}
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if canonicalKey == "" {
 			continue
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
+		holder.observedAt[canonicalKey] = observedAt
 	}
 }
 
@@ -161,16 +180,23 @@ func GetResponseStatus(ctx context.Context) int {
 }
 
 func GetResponseHeaders(ctx context.Context) http.Header {
+	headers, _ := GetResponseHeadersSnapshot(ctx)
+	return headers
+}
+
+// GetResponseHeadersSnapshot returns per-header receive clocks, including later
+// websocket quota events. Missing clocks are unknown, never the usage callback time.
+func GetResponseHeadersSnapshot(ctx context.Context) (http.Header, map[string]time.Time) {
 	if ctx == nil {
-		return nil
+		return nil, nil
 	}
 	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
 	if !ok || holder == nil {
-		return nil
+		return nil, nil
 	}
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
-	return cloneHTTPHeader(holder.headers)
+	return cloneHTTPHeader(holder.headers), maps.Clone(holder.observedAt)
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {

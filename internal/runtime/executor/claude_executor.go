@@ -248,6 +248,9 @@ func (e *ClaudeExecutor) applyNativeToolSearchFallback(ctx context.Context, auth
 	return ctx, req, opts
 }
 
+// SupportsCachePolicy advertises the final Messages wire enforcement boundary.
+func (e *ClaudeExecutor) SupportsCachePolicy() bool { return true }
+
 func (e *ClaudeExecutor) modelLevelCooling() bool {
 	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
 }
@@ -348,6 +351,7 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 
 // HttpRequest injects Claude credentials into the request and executes it.
 func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	helps.NoteUnsupportedClaudeHTTP(auth, "raw_http_admission")
 	if req == nil {
 		return nil, fmt.Errorf("claude executor: request is nil")
 	}

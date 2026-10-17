@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"runtime/debug"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/cachepolicy"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -130,13 +132,21 @@ type thinkingAdapter struct {
 }
 
 func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record) {
+	_ = a.HandleUsageAcknowledged(ctx, record)
+}
+
+func (a *usageAdapter) HandleUsageAcknowledged(ctx context.Context, record coreusage.Record) (err error) {
 	if a == nil {
-		return
+		return coreusage.ErrDeliveryMissing
+	}
+	if a.host.isPluginFused(a.pluginID) {
+		return coreusage.ErrDeliveryFused
 	}
 	plugin := a.host.currentUsagePlugin(a.pluginID)
 	if plugin == nil {
-		return
+		return coreusage.ErrDeliveryMissing
 	}
+	identityCurrent := a.plugin == nil || sameUsagePlugin(plugin, a.plugin)
 	if ctx == nil {
 		ctx = context.Background()
 	} else {
@@ -145,6 +155,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
+			err = coreusage.ErrDeliveryFused
 		}
 	}()
 	sessionID := strings.TrimSpace(record.SessionID)
@@ -183,7 +194,22 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(coreusage.APIKeyFromContext(ctx))
 	}
-	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
+	clientMeta := logging.GetClientRequestMetadata(ctx)
+	detail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
+	converted := pluginapi.UsageRecord{
+		SourceEvidence:      coreusage.CloneSourceEvidence(record.SourceEvidence),
+		LifecycleRequestID:  record.LifecycleRequestID,
+		CachePolicy:         cachepolicy.CloneEvidence(record.CachePolicy),
+		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
+		TokenBreakdown:      pluginTokenBreakdown(detail.TokenBreakdown),
+		ClientIP:            clientMeta.ClientIP,
+		ResolvedClientIP:    clientMeta.ResolvedClientIP,
+		XForwardedFor:       clientMeta.XForwardedFor,
+		UserAgent:           clientMeta.UserAgent,
+		NodeKind:            clientMeta.NodeKind,
+		IsFork:              clientMeta.IsFork,
+		IsCompaction:        clientMeta.IsCompaction,
+		AccessTokenSHA256:   record.AccessTokenSHA256,
 		RequestID:           requestID,
 		TraceID:             traceID,
 		Provider:            record.Provider,
@@ -215,6 +241,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			Body:       record.Fail.Body,
 		},
 		Detail: pluginapi.UsageDetail{
+			CacheCreation:       coreusage.CloneCacheCreation(detail.CacheCreation),
 			InputTokens:         record.Detail.InputTokens,
 			OutputTokens:        record.Detail.OutputTokens,
 			ReasoningTokens:     record.Detail.ReasoningTokens,
@@ -223,8 +250,29 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			CacheCreationTokens: record.Detail.CacheCreationTokens,
 			TotalTokens:         record.Detail.TotalTokens,
 		},
-		ResponseHeaders: cloneHeader(record.ResponseHeaders),
-	})
+		ResponseHeaders:           cloneHeader(record.ResponseHeaders),
+		ResponseHeadersObservedAt: maps.Clone(record.ResponseHeadersObservedAt),
+	}
+	if ack, ok := plugin.(pluginapi.AcknowledgedUsagePlugin); ok {
+		if err := ack.HandleUsageAcknowledged(ctx, converted); err != nil {
+			return err
+		}
+		if !identityCurrent {
+			return coreusage.ErrDeliveryMissing
+		}
+		return nil
+	}
+	plugin.HandleUsage(ctx, converted)
+	return coreusage.ErrDeliveryUnacknowledged
+}
+
+func pluginTokenBreakdown(b coreusage.TokenBreakdown) pluginapi.UsageTokenBreakdown {
+	return pluginapi.UsageTokenBreakdown{
+		SchemaVersion: b.SchemaVersion, Quality: string(b.Quality), TotalTokens: b.TotalTokens,
+		Input:              pluginapi.UsageTokenInput{TotalTokens: b.Input.TotalTokens, UncachedTokens: b.Input.UncachedTokens, CacheReadTokens: b.Input.CacheReadTokens, CacheWriteTokens: b.Input.CacheWriteTokens},
+		Output:             pluginapi.UsageTokenOutput{TotalTokens: b.Output.TotalTokens, NonReasoningTokens: b.Output.NonReasoningTokens, ReasoningTokens: b.Output.ReasoningTokens},
+		UnclassifiedTokens: b.UnclassifiedTokens,
+	}
 }
 
 func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) (out []byte, err error) {

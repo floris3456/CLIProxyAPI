@@ -73,6 +73,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			excluded = strings.Split(val, ",")
 		}
 	}
+	excluded = withMetadataExcludedModels(a, excluded)
 	if s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, fence, provider, authKind, excluded) {
 		return
 	}
@@ -91,7 +92,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case constant.GeminiInteractions:
 		models = registry.GetGeminiModels()
 		if entry := resolveConfigInteractionsKeyForConfig(cfg, a); entry != nil {
@@ -102,7 +103,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
@@ -114,10 +115,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "antigravity":
 		if !(cfg != nil && cfg.Home.Enabled) {
 			expectedRegEpoch := GlobalModelRegistry().ClientRegistrationEpoch(a.ID)
@@ -134,7 +135,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		} else {
 			models = registry.GetAntigravityModels()
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := resolveConfigClaudeKeyForConfig(cfg, a); entry != nil {
@@ -145,14 +146,14 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "codex":
 		if authKind == "apikey" {
 			if entry := resolveConfigCodexKeyForConfig(cfg, a); entry != nil {
 				models = buildCodexConfigModels(entry)
 				excluded = entry.ExcludedModels
 			}
-			models = applyExcludedModels(models, excluded)
+			models = recordCandidatesAndExclude(a.ID, models, excluded)
 			break
 		}
 
@@ -172,10 +173,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		default:
 			models = registry.GetCodexProModels()
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := resolveConfigXAIKeyForConfig(cfg, a); entry != nil {
@@ -186,10 +187,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "devin":
 		models = registry.GetDevinModels()
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	case "meta":
 		models = registry.GetMetaModels()
 		if entry := resolveConfigMetaKeyForConfig(cfg, a); entry != nil {
@@ -200,7 +201,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = recordCandidatesAndExclude(a.ID, models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg != nil {
@@ -643,6 +644,13 @@ func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string)
 	return cfg.OAuthExcludedModels[providerKey]
 }
 
+// recordCandidatesAndExclude remembers the credential's models before exclusions (so the
+// management API can list and re-enable disabled models), then applies the exclusions.
+func recordCandidatesAndExclude(clientID string, models []*ModelInfo, excluded []string) []*ModelInfo {
+	registry.RecordClientCandidates(clientID, models)
+	return applyExcludedModels(models, excluded)
+}
+
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 	if len(models) == 0 || len(excluded) == 0 {
 		return models
@@ -847,6 +855,10 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	models := make([]*ModelInfo, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
+		// excluded-models disables a configured model by its exposed ID (alias) or upstream name.
+		if compatModelExcluded(model, compat.ExcludedModels) {
+			continue
+		}
 		modelType := "openai-compatibility"
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
@@ -871,6 +883,24 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		models = append(models, info)
 	}
 	return models
+}
+
+func compatModelExcluded(model config.OpenAICompatibilityModel, excluded []string) bool {
+	if len(excluded) == 0 {
+		return false
+	}
+	alias := strings.ToLower(strings.TrimSpace(model.Alias))
+	name := strings.ToLower(strings.TrimSpace(model.Name))
+	for _, item := range excluded {
+		pattern := strings.ToLower(strings.TrimSpace(item))
+		if pattern == "" {
+			continue
+		}
+		if (alias != "" && matchWildcard(pattern, alias)) || (name != "" && matchWildcard(pattern, name)) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeCompatConfigModalities(raw []string) []string {
@@ -1238,14 +1268,96 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 			continue
 		}
 		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name)
-		if setting != nil && setting.MaxContextLength > 0 {
-			clone := *model
+		if setting == nil || !setting.HasOverrides() {
+			out = append(out, model)
+			continue
+		}
+		clone := *model
+		if setting.MaxContextLength > 0 {
 			clone.ContextLength = setting.MaxContextLength
 			clone.MaxContextLength = setting.MaxContextLength
-			out = append(out, &clone)
-		} else {
-			out = append(out, model)
 		}
+		if setting.MaxOutputTokens > 0 {
+			clone.MaxCompletionTokens = setting.MaxOutputTokens
+			if clone.OutputTokenLimit > 0 {
+				clone.OutputTokenLimit = setting.MaxOutputTokens
+			}
+		}
+		if name := strings.TrimSpace(setting.DisplayName); name != "" {
+			clone.DisplayName = name
+		}
+		if len(setting.ThinkingLevels) > 0 {
+			// Never mutate the shared definition: copy the thinking support before replacing levels.
+			thinkingSupport := registry.ThinkingSupport{}
+			if model.Thinking != nil {
+				thinkingSupport = *model.Thinking
+			}
+			thinkingSupport.Levels = append([]string(nil), setting.ThinkingLevels...)
+			clone.Thinking = &thinkingSupport
+			clone.ExplicitThinking = true
+		}
+		out = append(out, &clone)
+	}
+	return out
+}
+
+// withMetadataExcludedModels adds the credential file's own "excluded_models" when
+// the auth carries no pre-merged "excluded_models" attribute. The file watcher's
+// synthesizer sets that attribute, but auths loaded directly from the token store
+// (notably plugin-parsed credentials at startup) do not, so a registration racing
+// the watcher used to expose every model the account had excluded.
+func withMetadataExcludedModels(a *coreauth.Auth, excluded []string) []string {
+	if a == nil {
+		return excluded
+	}
+	if a.Attributes != nil && strings.TrimSpace(a.Attributes["excluded_models"]) != "" {
+		return excluded
+	}
+	perAccount := metadataExcludedModels(a.Metadata)
+	if len(perAccount) == 0 {
+		return excluded
+	}
+	seen := make(map[string]struct{}, len(excluded)+len(perAccount))
+	out := make([]string, 0, len(excluded)+len(perAccount))
+	for _, item := range append(append([]string{}, excluded...), perAccount...) {
+		key := strings.ToLower(strings.TrimSpace(item))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, strings.TrimSpace(item))
+	}
+	return out
+}
+
+// metadataExcludedModels reads per-account exclusions from credential metadata
+// ("excluded_models", legacy "excluded-models"), as the watcher synthesizer does.
+func metadataExcludedModels(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata["excluded_models"]
+	if !ok {
+		raw, ok = metadata["excluded-models"]
+	}
+	if !ok || raw == nil {
+		return nil
+	}
+	var out []string
+	switch v := raw.(type) {
+	case []string:
+		out = append(out, v...)
+	case []any:
+		for _, item := range v {
+			if s, okString := item.(string); okString {
+				out = append(out, s)
+			}
+		}
+	case string:
+		out = strings.Split(v, ",")
 	}
 	return out
 }

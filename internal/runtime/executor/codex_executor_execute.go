@@ -37,6 +37,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetLifecycleRequestID(opts.LifecycleRequestID)
+	defer reporter.FinishUsageDelivery()
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -231,6 +233,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetLifecycleRequestID(opts.LifecycleRequestID)
+	defer reporter.FinishUsageDelivery()
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat

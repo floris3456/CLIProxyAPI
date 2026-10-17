@@ -75,3 +75,17 @@ func TestDiffOAuthSettingsChanges_Reordering(t *testing.T) {
 		t.Fatalf("expected codex to be affected by reordering: %#v", affected)
 	}
 }
+
+func TestDiffOAuthSettingsChangesSeesModelOverrides(t *testing.T) {
+	base := map[string][]config.OAuthModelSetting{"claude": {{Name: "claude-opus-5-5"}}}
+	for name, changed := range map[string]config.OAuthModelSetting{
+		"max-output-tokens": {Name: "claude-opus-5-5", MaxOutputTokens: 64000},
+		"display-name":      {Name: "claude-opus-5-5", DisplayName: "Opus"},
+		"thinking-levels":   {Name: "claude-opus-5-5", ThinkingLevels: []string{"low", "high"}},
+	} {
+		changes, affected := DiffOAuthSettingsChanges(base, map[string][]config.OAuthModelSetting{"claude": {changed}})
+		if len(changes) != 1 || len(affected) != 1 || affected[0] != "claude" {
+			t.Errorf("%s: changes=%v affected=%v", name, changes, affected)
+		}
+	}
+}

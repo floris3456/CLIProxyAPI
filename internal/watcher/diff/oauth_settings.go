@@ -83,6 +83,15 @@ func summarizeOAuthSettingsList(list []config.OAuthModelSetting) OAuthSettingsSu
 		if setting.MaxContextLength > 0 {
 			key += fmt.Sprintf("|max-context-length=%d", setting.MaxContextLength)
 		}
+		if setting.MaxOutputTokens > 0 {
+			key += fmt.Sprintf("|max-output-tokens=%d", setting.MaxOutputTokens)
+		}
+		if name := strings.TrimSpace(setting.DisplayName); name != "" {
+			key += "|display-name=" + name
+		}
+		if len(setting.ThinkingLevels) > 0 {
+			key += "|thinking-levels=" + strings.ToLower(strings.Join(setting.ThinkingLevels, ","))
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}

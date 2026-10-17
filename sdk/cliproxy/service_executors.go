@@ -615,10 +615,14 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 			activeExcluded = strings.Split(val, ",")
 		}
 	}
+	if activeAuth != a {
+		activeExcluded = withMetadataExcludedModels(activeAuth, activeExcluded)
+		activeExcluded = withMetadataExcludedModels(a, activeExcluded)
+	}
 	if ctx != nil && ctx.Err() != nil {
 		return true
 	}
-	models := applyExcludedModels(result.Models, activeExcluded)
+	models := recordCandidatesAndExclude(activeAuth.ID, result.Models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	publicationFence := fence
 	if pluginAuthCommitted {

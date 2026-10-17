@@ -19,43 +19,56 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/cachepolicy"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type UsageReporter struct {
-	requestID           string
-	traceID             string
-	provider            string
-	baseURL             string
-	executorType        string
-	model               string
-	alias               string
-	authID              string
-	authIndex           string
-	authMu              sync.RWMutex
-	accessTokenHash     string
-	authType            string
-	apiKey              string
-	accessProvider      string
-	isNativeKey         bool
-	sessionID           string
-	parentSessionID     string
-	source              string
-	reasoning           string
-	serviceTier         string
-	generate            bool
-	stream              bool
-	requestedAt         time.Time
-	ttftMu              sync.RWMutex
-	ttft                time.Duration
-	firstPacketDuration time.Duration
-	firstPacketSet      bool
-	ttftStart           time.Time
-	ttftSet             bool
-	once                sync.Once
+	physicalCredentialSet  bool
+	physicalCredential     [32]byte
+	physicalBuiltin        bool
+	delivery               *usage.DeliveryTicket
+	policyAttempt          func(context.Context, pluginapi.CachePolicyAttemptRequest) (pluginapi.CachePolicyAttemptResponse, error)
+	policyAttemptStarted   bool
+	policyAttemptStartedAt time.Time
+	policyAttemptFailed    atomic.Bool
+	policyAttemptFinished  atomic.Bool
+	lifecycleRequestID     string
+	cachePolicy            *pluginapi.CachePolicyEvidence
+	requestID              string
+	traceID                string
+	provider               string
+	baseURL                string
+	executorType           string
+	model                  string
+	alias                  string
+	authID                 string
+	authIndex              string
+	authMu                 sync.RWMutex
+	accessTokenHash        string
+	authType               string
+	apiKey                 string
+	accessProvider         string
+	isNativeKey            bool
+	sessionID              string
+	parentSessionID        string
+	source                 string
+	reasoning              string
+	serviceTier            string
+	generate               bool
+	stream                 bool
+	requestedAt            time.Time
+	ttftMu                 sync.RWMutex
+	ttft                   time.Duration
+	firstPacketDuration    time.Duration
+	firstPacketSet         bool
+	ttftStart              time.Time
+	ttftSet                bool
+	once                   sync.Once
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -85,6 +98,18 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	delivery, requestedAt := usage.DefaultManager().BeginDelivery(provider)
+	if provider == "claude" {
+		id, index := "", ""
+		if auth != nil {
+			id, index = auth.ID, auth.EnsureIndex()
+		}
+		usage.DefaultManager().NoteSourceGap(provider, id, index, "unsupported_reporter", requestedAt)
+	}
+	return newUsageReporter(ctx, provider, model, auth, delivery, requestedAt)
+}
+
+func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth, delivery *usage.DeliveryTicket, requestedAt time.Time) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
 	accessProvider := AccessProviderFromContext(ctx)
 	isNativeKey := false
@@ -123,13 +148,14 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		traceID = internallogging.GetRequestID(ctx)
 	}
 	reporter := &UsageReporter{
+		delivery:        delivery,
 		requestID:       uuid.NewString(),
 		traceID:         traceID,
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
 		alias:           strings.TrimSpace(alias),
-		requestedAt:     time.Now(),
+		requestedAt:     requestedAt,
 		apiKey:          apiKey,
 		accessProvider:  accessProvider,
 		isNativeKey:     isNativeKey,
@@ -530,6 +556,7 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	}
 	if *errPtr != nil {
 		r.PublishFailure(ctx, *errPtr)
+		r.FinishUsageDelivery()
 	}
 }
 
@@ -539,6 +566,9 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
+		if !failed && !hasNonZeroTokenUsage(detail) {
+			r.delivery.FailSource("usage_unavailable_or_zero_only")
+		}
 		r.publishAttemptRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
@@ -567,6 +597,7 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
+		r.delivery.FailSource("usage_unavailable_or_zero_only")
 		r.publishAttemptRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
 	})
 }
@@ -574,12 +605,22 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 // publishAttemptRecord emits the record for one upstream attempt and the
 // observability warnings that belong to the attempt rather than to a single event.
 func (r *UsageReporter) publishAttemptRecord(ctx context.Context, record usage.Record) {
-	r.publishRecord(ctx, record)
+	r.policyAttemptFailed.Store(record.Failed)
+	record.ResponseHeaders, record.ResponseHeadersObservedAt = internallogging.GetResponseHeadersSnapshot(ctx)
+	usage.DefaultManager().PublishDelivery(ctx, record, r.delivery, true)
 	r.warnModelSubstitution(ctx)
 }
 
+// FinishUsageDelivery is an explicit physical producer-shutdown notification.
+// A terminal usage event alone is insufficient; call after closing the body.
+func (r *UsageReporter) FinishUsageDelivery() {
+	if r != nil {
+		r.delivery.Finish()
+	}
+}
+
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
-	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	record.ResponseHeaders, record.ResponseHeadersObservedAt = internallogging.GetResponseHeadersSnapshot(ctx)
 	usage.PublishRecord(ctx, record)
 }
 
@@ -637,6 +678,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		responseModel = r.ResponseModel()
 	}
 	return usage.Record{
+		LifecycleRequestID:  r.lifecycleRequestID,
+		CachePolicy:         cachepolicy.CloneEvidence(r.cachePolicy),
 		RequestID:           r.requestID,
 		TraceID:             r.traceID,
 		Provider:            r.provider,
@@ -743,9 +786,24 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.reporter.markSourceDispatch(req)
+	guard := t.reporter.guardPhysicalDispatch(req, t.base)
+	if guard != nil && req.Body != nil && req.Body != http.NoBody {
+		req = req.Clone(req.Context())
+		req.Body = &physicalSourceBody{ReadCloser: req.Body, close: guard.RequestBodyClosed}
+		if getBody := req.GetBody; getBody != nil {
+			req.GetBody = func() (io.ReadCloser, error) { guard.RequestBodyReplayed(); return getBody() }
+		}
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
+	if guard != nil {
+		guard.RoundTripReturned(resp != nil && resp.Body != nil && resp.Body != http.NoBody, errRoundTrip != nil)
+		if resp != nil && resp.Body != nil && resp.Body != http.NoBody {
+			resp.Body = &physicalSourceBody{ReadCloser: resp.Body, close: guard.ResponseBodyClosed}
+		}
+	}
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
 	}
@@ -871,6 +929,10 @@ type StreamUsageBuffer struct {
 	detail        usage.Detail
 	ok            bool
 	responseModel string
+	// Claude reports one assigned tier per response. Conflicts/invalid explicit
+	// observations are sticky; generic OpenAI/Codex latest-tier behavior is separate.
+	claudeTier        string
+	claudeTierInvalid bool
 }
 
 var (
@@ -942,15 +1004,48 @@ func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
 	if b == nil {
 		return
 	}
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return
+	}
+	if !gjson.ValidBytes(payload) {
+		b.claudeTierInvalid = true
+		b.detail.ResponseServiceTier = ""
+		return
+	}
 	if b.responseModel == "" {
-		if payload := jsonPayload(line); len(payload) > 0 {
-			if model, _ := extractClaudeResponseModelEvent(payload); model != "" {
-				b.responseModel = model
-			}
+		if model, _ := extractClaudeResponseModelEvent(payload); model != "" {
+			b.responseModel = model
 		}
 	}
-	if detail, ok := ParseClaudeStreamUsage(line); ok {
-		ObserveMergedStreamUsage(b, detail)
+	root := gjson.ParseBytes(payload)
+	node := root.Get("usage")
+	if !node.Exists() {
+		node = root.Get("message.usage")
+	}
+	if !node.Exists() {
+		return
+	}
+	tier, present := claudeResponseServiceTier(node)
+	if present {
+		if tier == "" || b.claudeTier != "" && b.claudeTier != tier {
+			b.claudeTierInvalid = true
+		}
+		if !b.claudeTierInvalid {
+			b.claudeTier = tier
+		}
+	}
+	if hasClaudeUsageTokenFields(node) {
+		ObserveMergedStreamUsage(b, parseClaudeUsageNode(node))
+	} else if !b.ok {
+		// A tier-only event is metadata, not complete zero usage. Subsequent
+		// tier-only updates must not recalculate existing counters/quality.
+		b.detail = claudeMetadataOnlyUsage("")
+		b.ok = true
+	}
+	b.detail.ResponseServiceTier = b.claudeTier
+	if b.claudeTierInvalid {
+		b.detail.ResponseServiceTier = ""
 	}
 }
 
@@ -1146,9 +1241,12 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
+	if !gjson.ValidBytes(data) {
+		return claudeMetadataOnlyUsage("")
+	}
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !usageNode.Exists() {
-		return usage.Detail{}
+		return claudeMetadataOnlyUsage("")
 	}
 	return parseClaudeUsageNode(usageNode)
 }
@@ -1169,6 +1267,10 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 }
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+	tier, _ := claudeResponseServiceTier(usageNode)
+	if !hasClaudeUsageTokenFields(usageNode) {
+		return claudeMetadataOnlyUsage(tier)
+	}
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
 	rawOutputTokens := usageNode.Get("output_tokens").Int()
@@ -1194,12 +1296,14 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		nonReasoningOutput = 0
 	}
 	detail := usage.Detail{
+		ResponseServiceTier: tier,
 		InputTokens:         usageNode.Get("input_tokens").Int(),
 		OutputTokens:        rawOutputTokens,
 		ReasoningTokens:     reasoningTokens,
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		CacheCreation:       parseClaudeCacheCreation(usageNode),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -1216,6 +1320,49 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.TotalTokens,
 	)
 	return detail
+}
+
+// Only the response usage field is assigned-tier evidence. Request values,
+// capitalization/whitespace repairs and arbitrary strings cannot supply it.
+func claudeResponseServiceTier(node gjson.Result) (string, bool) {
+	value := node.Get("service_tier")
+	if !value.Exists() {
+		return "", false
+	}
+	count := 0
+	node.ForEach(func(key, value gjson.Result) bool {
+		if key.Str == "service_tier" {
+			count++
+		}
+		return count < 2
+	})
+	if count != 1 {
+		return "", true
+	}
+	if value.Type == gjson.String {
+		switch value.Str {
+		case "standard", "priority", "batch":
+			return value.Str, true
+		}
+	}
+	return "", true
+}
+
+func claudeMetadataOnlyUsage(tier string) usage.Detail {
+	// NewUnclassifiedTokenBreakdown(0) intentionally means complete known zero
+	// for other callers. A metadata-only Claude usage object cannot assert that.
+	return usage.Detail{ResponseServiceTier: tier, TokenBreakdown: usage.TokenBreakdown{
+		SchemaVersion: usage.TokenAccountingSchemaVersion, Quality: usage.TokenAccountingQualityUnclassified,
+	}}
+}
+
+func hasClaudeUsageTokenFields(node gjson.Result) bool {
+	for _, field := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation.ephemeral_5m_input_tokens", "cache_creation.ephemeral_1h_input_tokens", "output_tokens_details.thinking_tokens", "output_tokens_details.reasoning_tokens", "thinking_tokens"} {
+		if node.Get(field).Exists() {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {

@@ -211,6 +211,16 @@ func (h *Host) CompleteRequestExcept(ctx context.Context, completion pluginapi.R
 	if h == nil {
 		return
 	}
+	if h.queueCachePolicyCompletion(ctx, completion, skipPluginID) {
+		return
+	}
+	h.completeRequestExceptNow(ctx, completion, skipPluginID)
+}
+
+func (h *Host) completeRequestExceptNow(ctx context.Context, completion pluginapi.RequestCompletion, skipPluginID string) {
+	if h == nil {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	} else {

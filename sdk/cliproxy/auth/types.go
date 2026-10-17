@@ -120,6 +120,8 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// accountObservation is consumed by Manager mutations; see ObserveProviderAccount.
+	accountObservation *providerAccountObservation
 }
 
 const (

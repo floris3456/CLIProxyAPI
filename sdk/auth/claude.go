@@ -222,11 +222,14 @@ waitForCallback:
 		fmt.Println("Claude API key obtained and stored")
 	}
 
-	return &coreauth.Auth{
+	record := &coreauth.Auth{
 		ID:       fileName,
 		Provider: a.Provider(),
 		FileName: fileName,
 		Storage:  tokenStorage,
 		Metadata: metadata,
-	}, nil
+	}
+	// The token exchange UUID came from Anthropic in this process (in-memory only).
+	record.ObserveProviderAccount(tokenStorage.AccountUUID)
+	return record, nil
 }
